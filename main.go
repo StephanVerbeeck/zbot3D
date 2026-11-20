@@ -18,21 +18,61 @@ import (
 )
 
 const (
-	floorY        = -0.15 // Bottom of the wheels (radius 0.15 centered at Y=0)
-	gridCellSize  = 1.0   // Size of each square on the floor
-	gridHalfCount = 100   // Number of squares in each direction from center
+	floorY        = -0.15 // Onderkant van de wielen (straal 0.15 gecentreerd op Y=0)
+	gridCellSize  = 1.0   // Grootte van elk groen vierkant op de vloer
+	gridHalfCount = 100   // Aantal vierkanten in elke richting vanaf het midden
+
+	wheelRadius    float32 = 0.15
+	wheelBaseHalf  float32 = 0.80
+	trackWidthHalf float32 = 0.65
+	normalDriveMax float32 = 3.0  // Normale rijsnelheid (units/sec)
+	fastDriveMax   float32 = 7.0  // Snelle rijsnelheid met Shift (units/sec)
+	driveAccel     float32 = 4.5  // Versnelling (traagheid bij optrekken)
+	driveDecel     float32 = 4.0  // Vertraging (traagheid bij uitrollen / Shift loslaten)
+	maxSteerAngle  float32 = 0.45 // Max 4WS stuurhoek tijdens rijden (~26 graden)
+	steerRate      float32 = 2.5  // Snelheid waarmee wielen insturen (rad/sec)
+	normalSpinMax  float32 = 1.4  // Normale draaisnelheid op de plaats (rad/sec)
+	fastSpinMax    float32 = 2.8  // Snelle draaisnelheid op de plaats met Shift (rad/sec)
+	spinAccel      float32 = 3.5  // Hoekversnelling op de plaats
 )
 
+var wheelPositions = [4][3]float32{
+	{-trackWidthHalf, 0.0, wheelBaseHalf},  // 0: Links-voor
+	{trackWidthHalf, 0.0, wheelBaseHalf},   // 1: Rechts-voor
+	{-trackWidthHalf, 0.0, -wheelBaseHalf}, // 2: Links-achter
+	{trackWidthHalf, 0.0, -wheelBaseHalf},  // 3: Rechts-achter
+}
+
 type ZBotApp struct {
-	app        *app.Application
-	scene      *core.Node
-	robot      *core.Node
-	floor      *graphic.Lines
-	chassis    *graphic.Mesh
-	centralArm *core.Node
-	sideArmL   *core.Node
-	sideArmR   *core.Node
-	mode       int // 0: Ingeklapt, 1: SUV/Werkplatform, 2: Volledig Uitgeklapt, 3: Hand-locomotie
+	app          *app.Application
+	scene        *core.Node
+	robot        *core.Node
+	floor        *graphic.Lines
+	chassis      *graphic.Mesh
+	centralArm   *core.Node
+	sideArmL     *core.Node
+	sideArmR     *core.Node
+	wheelSteer   [4]*core.Node
+	wheelRoll    [4]*core.Node
+	wheelRollAng [4]float32
+	mode         int // 0: Ingeklapt, 1: SUV/Werkplatform, 2: Volledig Uitgeklapt, 3: Hand-locomotie
+}
+
+func moveToward(current, target, maxDelta float32) float32 {
+	if target > current {
+		if current+maxDelta > target {
+			return target
+		}
+		return current + maxDelta
+	}
+	if current-maxDelta < target {
+		return target
+	}
+	return current - maxDelta
+}
+
+func lerp(a, b, t float32) float32 {
+	return a + (b-a)*t
 }
 
 func main() {
@@ -72,7 +112,7 @@ func main() {
 
 	// 4. Muisbesturing voor de camera
 	var (
-		camYaw       float32 = 0.0
+		camYaw       float32 = math.Pi - 0.35 // Start schuin achter de robot
 		camPitch     float32 = 0.45
 		camDistance  float32 = 6.5
 		cameraFrozen         = false
@@ -105,7 +145,6 @@ func main() {
 		if mev.Button == window.MouseButtonLeft {
 			cameraFrozen = !cameraFrozen
 			if !cameraFrozen {
-				// Reset cursor-anker zodat de camera niet verspringt bij hervatten
 				hasCursorPos = false
 			}
 		}
@@ -133,7 +172,6 @@ func main() {
 		camYaw -= dx * sensitivity
 		camPitch += dy * sensitivity
 
-		// Beperk verticale hoek zodat de camera boven de vloer blijft en niet omslaat
 		const minPitch float32 = 0.05
 		const maxPitch float32 = math.Pi/2 - 0.05
 		if camPitch < minPitch {
@@ -160,9 +198,21 @@ func main() {
 		updateCamera()
 	})
 
-	// 5. Toetsenbord-interactie voor modi
+	// 5. Toetsenbord-interactie (modi + rijden/sturen)
+	keysDown := make(map[window.Key]bool)
+	shiftHeld := false
+
+	application.Subscribe(window.OnKeyDown, func(evname string, ev interface{}) {
+		kev := ev.(*window.KeyEvent)
+		keysDown[kev.Key] = true
+		shiftHeld = (kev.Mods&window.ModShift) != 0 || keysDown[window.KeyLeftShift] || keysDown[window.KeyRightShift]
+	})
+
 	application.Subscribe(window.OnKeyUp, func(evname string, ev interface{}) {
 		kev := ev.(*window.KeyEvent)
+		keysDown[kev.Key] = false
+		shiftHeld = (kev.Mods&window.ModShift) != 0 || keysDown[window.KeyLeftShift] || keysDown[window.KeyRightShift]
+
 		switch kev.Key {
 		case window.Key1:
 			zApp.setMode(0) // Ingeklapt (Nesting Cassette)
@@ -175,12 +225,130 @@ func main() {
 		}
 	})
 
+	// Robot bewegingsstatus (met traagheid)
+	var (
+		robotX         float32
+		robotZ         float32
+		robotHeading   float32
+		currentSpeed   float32 // Lineaire rijsnelheid (vooruit/achteruit)
+		currentSteer   float32 // Huidige 4WS stuurhoek tijdens rijden
+		currentSpin    float32 // Huidige draaisnelheid bij stilstaan
+		pointTurnBlend float32 // 0 = rijden (4WS), 1 = draaien rond middelpunt
+	)
+
+	// Vooraf berekende raaklijn-stuurhoeken voor draaien rond het middelpunt
+	var pointTurnAngles [4]float32
+	var pointTurnRollSign [4]float32
+	wheelCenterDist := math32.Sqrt(trackWidthHalf*trackWidthHalf + wheelBaseHalf*wheelBaseHalf)
+	for i, pos := range wheelPositions {
+		wx, wz := pos[0], pos[2]
+		if wx <= 0 {
+			pointTurnAngles[i] = math32.Atan2(wz, -wx)
+			pointTurnRollSign[i] = 1.0
+		} else {
+			pointTurnAngles[i] = math32.Atan2(-wz, wx)
+			pointTurnRollSign[i] = -1.0
+		}
+	}
+
 	// 6. Render loop / update
 	application.Run(func(rend *renderer.Renderer, deltaTime time.Duration) {
-		// Houd de oneindige vloer gecentreerd onder de robot op hele rastervakken
-		robotPos := zApp.robot.Position()
-		snapX := float32(math.Floor(float64(robotPos.X/gridCellSize))) * gridCellSize
-		snapZ := float32(math.Floor(float64(robotPos.Z/gridCellSize))) * gridCellSize
+		dt := float32(deltaTime.Seconds())
+		if dt > 0.05 {
+			dt = 0.05
+		}
+
+		// Lees rij- en stuurinvoer (W/S en A/D)
+		var driveInput float32
+		if keysDown[window.KeyW] {
+			driveInput += 1.0
+		}
+		if keysDown[window.KeyS] {
+			driveInput -= 1.0
+		}
+
+		var steerInput float32
+		if keysDown[window.KeyA] {
+			steerInput += 1.0 // Links sturen (+Y rotatie)
+		}
+		if keysDown[window.KeyD] {
+			steerInput -= 1.0 // Rechts sturen (-Y rotatie)
+		}
+
+		// Bepaal doelsnelheid (fast met Shift, normal zonder Shift, 0 bij loslaten)
+		maxSpeed := normalDriveMax
+		maxSpin := normalSpinMax
+		if shiftHeld {
+			maxSpeed = fastDriveMax
+			maxSpin = fastSpinMax
+		}
+		targetSpeed := driveInput * maxSpeed
+
+		// Pas lineaire traagheid toe (fast <-> normal <-> zero)
+		rate := driveDecel
+		if math32.Abs(targetSpeed) > math32.Abs(currentSpeed) && targetSpeed*currentSpeed >= 0 {
+			rate = driveAccel
+		} else if targetSpeed*currentSpeed < 0 {
+			rate = driveAccel + driveDecel
+		}
+		currentSpeed = moveToward(currentSpeed, targetSpeed, rate*dt)
+
+		// Speciale modus: als de robot niet rijdt, draait hij rond zijn middelpunt
+		isStationary := math32.Abs(currentSpeed) < 0.08 && driveInput == 0
+		var targetPointBlend float32
+		var targetSpin float32
+		if isStationary && (steerInput != 0 || math32.Abs(currentSpin) > 0.01) {
+			targetPointBlend = 1.0
+			targetSpin = steerInput * maxSpin
+		}
+
+		pointTurnBlend = moveToward(pointTurnBlend, targetPointBlend, 4.0*dt)
+		currentSpin = moveToward(currentSpin, targetSpin, spinAccel*dt)
+
+		// Normale 4WS stuurhoek bij rijden
+		targetSteer := steerInput * maxSteerAngle
+		if isStationary {
+			targetSteer = 0
+		}
+		currentSteer = moveToward(currentSteer, targetSteer, steerRate*dt)
+
+		// Werk positie en oriëntatie van de robot bij
+		var angularVel float32
+		if pointTurnBlend > 0.5 && math32.Abs(currentSpeed) < 0.08 {
+			angularVel = currentSpin
+		} else {
+			// 4-wiel besturing: grotere draaicirkel-respons door tegengesteld sturende achterwielen
+			angularVel = (currentSpeed / wheelBaseHalf) * math32.Tan(currentSteer)
+		}
+
+		robotHeading += angularVel * dt
+		forwardX := math32.Sin(robotHeading)
+		forwardZ := math32.Cos(robotHeading)
+		robotX += forwardX * currentSpeed * dt
+		robotZ += forwardZ * currentSpeed * dt
+
+		zApp.robot.SetPosition(robotX, 0, robotZ)
+		zApp.robot.SetRotationY(robotHeading)
+
+		// Werk stuurhoek en rolbeweging van alle 4 wielen bij
+		for i := 0; i < 4; i++ {
+			driveWheelYaw := currentSteer
+			if i >= 2 {
+				// Achterwielen sturen tegengesteld (4-wheel steering)
+				driveWheelYaw = -currentSteer
+			}
+			wheelYaw := lerp(driveWheelYaw, pointTurnAngles[i], pointTurnBlend)
+			zApp.wheelSteer[i].SetRotationY(wheelYaw)
+
+			// Rol-snelheid van dit wiel in de gereden richting
+			rimSpeed := currentSpeed + pointTurnRollSign[i]*currentSpin*wheelCenterDist*pointTurnBlend
+			zApp.wheelRollAng[i] += (rimSpeed / wheelRadius) * dt
+			zApp.wheelRoll[i].SetRotationX(zApp.wheelRollAng[i])
+		}
+
+		// Houd de oneindige groene rastervloer gecentreerd onder de robot
+		snapX := float32(math.Floor(float64(robotX/gridCellSize))) * gridCellSize
+		snapZ := float32(math.Floor(float64(robotZ/gridCellSize))) * gridCellSize
 		zApp.floor.SetPosition(snapX, floorY, snapZ)
 
 		if !cameraFrozen {
@@ -231,21 +399,29 @@ func (z *ZBotApp) BuildZBot() {
 	z.chassis.SetPosition(0, 0.15, 0)
 	z.robot.Add(z.chassis)
 
-	// Wielen (4 stuks omnidirectioneel)
-	wheelGeom := geometry.NewCylinder(0.15, 0.1, 16, 1, true, true)
+	// Wielen (4 stuks met stuur- en rolhiërarchie + zichtbare spaak)
+	wheelGeom := geometry.NewCylinder(float64(wheelRadius), 0.1, 16, 1, true, true)
+	spokeGeom := geometry.NewBox(0.11, wheelRadius*1.8, 0.03)
 	matWheel := material.NewStandard(&math32.Color{R: 0.1, G: 0.1, B: 0.1})
+	matSpoke := material.NewStandard(&math32.Color{R: 0.85, G: 0.85, B: 0.85})
 
-	wheelPositions := [4][3]float32{
-		{-0.65, 0.0, 0.8},  // Links-voor
-		{0.65, 0.0, 0.8},   // Rechts-voor
-		{-0.65, 0.0, -0.8}, // Links-achter
-		{0.65, 0.0, -0.8},  // Rechts-achter
-	}
-	for _, pos := range wheelPositions {
+	for i, pos := range wheelPositions {
+		steerNode := core.NewNode()
+		steerNode.SetPosition(pos[0], pos[1], pos[2])
+
+		rollNode := core.NewNode()
+		steerNode.Add(rollNode)
+
 		wheel := graphic.NewMesh(wheelGeom, matWheel)
-		wheel.SetPosition(pos[0], pos[1], pos[2])
-		wheel.SetRotation(0, 0, math.Pi/2)
-		z.robot.Add(wheel)
+		wheel.SetRotationZ(math.Pi / 2)
+		rollNode.Add(wheel)
+
+		spoke := graphic.NewMesh(spokeGeom, matSpoke)
+		rollNode.Add(spoke)
+
+		z.wheelSteer[i] = steerNode
+		z.wheelRoll[i] = rollNode
+		z.robot.Add(steerNode)
 	}
 
 	// --- B. Centrale Stam (Heftank / Hefkolom) ---
