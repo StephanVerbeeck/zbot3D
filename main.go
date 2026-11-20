@@ -17,9 +17,17 @@ import (
 	"github.com/g3n/engine/window"
 )
 
+const (
+	floorY        = -0.15 // Bottom of the wheels (radius 0.15 centered at Y=0)
+	gridCellSize  = 1.0   // Size of each square on the floor
+	gridHalfCount = 100   // Number of squares in each direction from center
+)
+
 type ZBotApp struct {
 	app        *app.Application
 	scene      *core.Node
+	robot      *core.Node
+	floor      *graphic.Lines
 	chassis    *graphic.Mesh
 	centralArm *core.Node
 	sideArmL   *core.Node
@@ -36,11 +44,8 @@ func main() {
 	width, height := application.GetSize()
 	cam := camera.New(float32(width) / float32(height))
 	cam.SetFov(60)
-	cam.SetPosition(0, 3, 6)
-	cam.LookAt(&math32.Vector3{X: 0, Y: 1, Z: 0}, &math32.Vector3{X: 0, Y: 1, Z: 0})
 	scene.Add(cam)
 
-	// Zorg dat viewport en camera-aspectratio meeschalen bij resizen
 	onResize := func(evname string, ev interface{}) {
 		w, h := application.GetSize()
 		application.Gls().Viewport(0, 0, int32(w), int32(h))
@@ -49,7 +54,6 @@ func main() {
 	application.Subscribe(window.OnWindowSize, onResize)
 	onResize("", nil)
 
-	// Optioneel: camera.NewOrbitControl(cam) kan hier gekoppeld worden voor muisbesturing
 	ambLight := light.NewAmbient(&math32.Color{R: 0.3, G: 0.3, B: 0.3}, 1.0)
 	scene.Add(ambLight)
 	dirLight := light.NewDirectional(&math32.Color{R: 0.8, G: 0.8, B: 0.8}, 1.0)
@@ -62,10 +66,101 @@ func main() {
 		mode:  0,
 	}
 
-	// 3. Bouw de Z-Bot hiërarchie
+	// 3. Bouw de vloer en de Z-Bot hiërarchie
+	zApp.BuildFloor()
 	zApp.BuildZBot()
 
-	// 4. Toetsenbord-interactie voor modi
+	// 4. Muisbesturing voor de camera
+	var (
+		camYaw       float32 = 0.0
+		camPitch     float32 = 0.45
+		camDistance  float32 = 6.5
+		cameraFrozen         = false
+		hasCursorPos         = false
+		lastCursorX  float32
+		lastCursorY  float32
+	)
+
+	updateCamera := func() {
+		robotPos := zApp.robot.Position()
+		target := math32.Vector3{
+			X: robotPos.X,
+			Y: robotPos.Y + 0.6, // Centrum van de robot
+			Z: robotPos.Z,
+		}
+
+		cosPitch := math32.Cos(camPitch)
+		camX := target.X + camDistance*cosPitch*math32.Sin(camYaw)
+		camY := target.Y + camDistance*math32.Sin(camPitch)
+		camZ := target.Z + camDistance*cosPitch*math32.Cos(camYaw)
+
+		cam.SetPosition(camX, camY, camZ)
+		cam.LookAt(&target, &math32.Vector3{X: 0, Y: 1, Z: 0})
+	}
+	updateCamera()
+
+	// Linkermuisknop schakelt camera-bevriezing aan/uit
+	application.Subscribe(window.OnMouseDown, func(evname string, ev interface{}) {
+		mev := ev.(*window.MouseEvent)
+		if mev.Button == window.MouseButtonLeft {
+			cameraFrozen = !cameraFrozen
+			if !cameraFrozen {
+				// Reset cursor-anker zodat de camera niet verspringt bij hervatten
+				hasCursorPos = false
+			}
+		}
+	})
+
+	// Muis X/Y draait de camera horizontaal en verticaal rond het centrum van de robot
+	application.Subscribe(window.OnCursor, func(evname string, ev interface{}) {
+		cev := ev.(*window.CursorEvent)
+		if cameraFrozen {
+			return
+		}
+		if !hasCursorPos {
+			lastCursorX = cev.Xpos
+			lastCursorY = cev.Ypos
+			hasCursorPos = true
+			return
+		}
+
+		dx := cev.Xpos - lastCursorX
+		dy := cev.Ypos - lastCursorY
+		lastCursorX = cev.Xpos
+		lastCursorY = cev.Ypos
+
+		const sensitivity float32 = 0.005
+		camYaw -= dx * sensitivity
+		camPitch += dy * sensitivity
+
+		// Beperk verticale hoek zodat de camera boven de vloer blijft en niet omslaat
+		const minPitch float32 = 0.05
+		const maxPitch float32 = math.Pi/2 - 0.05
+		if camPitch < minPitch {
+			camPitch = minPitch
+		} else if camPitch > maxPitch {
+			camPitch = maxPitch
+		}
+
+		updateCamera()
+	})
+
+	// Scrollwiel beweegt de camera dichterbij / verder weg
+	application.Subscribe(window.OnScroll, func(evname string, ev interface{}) {
+		if cameraFrozen {
+			return
+		}
+		sev := ev.(*window.ScrollEvent)
+		camDistance -= float32(sev.Yoffset) * 0.5
+		if camDistance < 1.5 {
+			camDistance = 1.5
+		} else if camDistance > 60.0 {
+			camDistance = 60.0
+		}
+		updateCamera()
+	})
+
+	// 5. Toetsenbord-interactie voor modi
 	application.Subscribe(window.OnKeyUp, func(evname string, ev interface{}) {
 		kev := ev.(*window.KeyEvent)
 		switch kev.Key {
@@ -80,14 +175,51 @@ func main() {
 		}
 	})
 
-	// 5. Render loop / update
+	// 6. Render loop / update
 	application.Run(func(rend *renderer.Renderer, deltaTime time.Duration) {
+		// Houd de oneindige vloer gecentreerd onder de robot op hele rastervakken
+		robotPos := zApp.robot.Position()
+		snapX := float32(math.Floor(float64(robotPos.X/gridCellSize))) * gridCellSize
+		snapZ := float32(math.Floor(float64(robotPos.Z/gridCellSize))) * gridCellSize
+		zApp.floor.SetPosition(snapX, floorY, snapZ)
+
+		if !cameraFrozen {
+			updateCamera()
+		}
+
 		application.Gls().Clear(gls.DEPTH_BUFFER_BIT | gls.COLOR_BUFFER_BIT)
 		rend.Render(scene, cam)
 	})
 }
 
+func (z *ZBotApp) BuildFloor() {
+	geom := geometry.NewGeometry()
+	positions := math32.NewArrayF32(0, 0)
+
+	extent := float32(gridHalfCount) * gridCellSize
+	for i := -gridHalfCount; i <= gridHalfCount; i++ {
+		offset := float32(i) * gridCellSize
+		// Lijn parallel aan de Z-as
+		positions.Append(offset, 0, -extent, offset, 0, extent)
+		// Lijn parallel aan de X-as
+		positions.Append(-extent, 0, offset, extent, 0, offset)
+	}
+
+	geom.AddVBO(gls.NewVBO(positions).AddAttrib(gls.VertexPosition))
+
+	green := &math32.Color{R: 0.0, G: 0.85, B: 0.2}
+	matFloor := material.NewStandard(green)
+	matFloor.SetEmissiveColor(green)
+
+	z.floor = graphic.NewLines(geom, matFloor)
+	z.floor.SetPosition(0, floorY, 0)
+	z.scene.Add(z.floor)
+}
+
 func (z *ZBotApp) BuildZBot() {
+	z.robot = core.NewNode()
+	z.scene.Add(z.robot)
+
 	// Materialen
 	matChassis := material.NewStandard(&math32.Color{R: 0.15, G: 0.15, B: 0.18}) // Donker carbon/metaal
 	matArm := material.NewStandard(&math32.Color{R: 0.2, G: 0.6, B: 0.8})        // Industrieel blauw/teal
@@ -97,7 +229,7 @@ func (z *ZBotApp) BuildZBot() {
 	chassisGeom := geometry.NewBox(1.2, 0.3, 2.0)
 	z.chassis = graphic.NewMesh(chassisGeom, matChassis)
 	z.chassis.SetPosition(0, 0.15, 0)
-	z.scene.Add(z.chassis)
+	z.robot.Add(z.chassis)
 
 	// Wielen (4 stuks omnidirectioneel)
 	wheelGeom := geometry.NewCylinder(0.15, 0.1, 16, 1, true, true)
@@ -113,7 +245,7 @@ func (z *ZBotApp) BuildZBot() {
 		wheel := graphic.NewMesh(wheelGeom, matWheel)
 		wheel.SetPosition(pos[0], pos[1], pos[2])
 		wheel.SetRotation(0, 0, math.Pi/2)
-		z.scene.Add(wheel)
+		z.robot.Add(wheel)
 	}
 
 	// --- B. Centrale Stam (Heftank / Hefkolom) ---
@@ -129,7 +261,7 @@ func (z *ZBotApp) BuildZBot() {
 	sensorMesh.SetPosition(0, 1.3, 0)
 	z.centralArm.Add(sensorMesh)
 
-	z.scene.Add(z.centralArm)
+	z.robot.Add(z.centralArm)
 
 	// --- C. Twee Zijarmen (Montage aan de top van de centrale arm) ---
 	z.sideArmL = core.NewNode()
