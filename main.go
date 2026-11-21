@@ -30,22 +30,24 @@ const (
 	driveAccel     float32 = 4.5  // Versnelling (traagheid bij optrekken)
 	driveDecel     float32 = 4.0  // Vertraging (traagheid bij uitrollen / Shift loslaten)
 	maxSteerAngle  float32 = 0.45 // Max 4WS stuurhoek tijdens rijden (~26 graden)
-	steerRate      float32 = 2.5  // Snelheid waarmee wielen insturen (rad/sec)
+	steerRate      float32 = 2.5  // Snelheid waarmee stuurhoek opbouwt (rad/sec)
+	wheelPivotRate float32 = 7.0  // Draaisnelheid van de wielnaven (rad/sec)
 	normalSpinMax  float32 = 1.4  // Normale draaisnelheid op de plaats (rad/sec)
 	fastSpinMax    float32 = 2.8  // Snelle draaisnelheid op de plaats met Shift (rad/sec)
-	spinAccel      float32 = 3.5  // Hoekversnelling op de plaats
+	spinAccel      float32 = 3.5  // Hoekversnelling
 )
 
-var wheelPositions = [4][3]float32{
-	{-trackWidthHalf, 0.0, wheelBaseHalf},  // 0: Links-voor
-	{trackWidthHalf, 0.0, wheelBaseHalf},   // 1: Rechts-voor
-	{-trackWidthHalf, 0.0, -wheelBaseHalf}, // 2: Links-achter
-	{trackWidthHalf, 0.0, -wheelBaseHalf},  // 3: Rechts-achter
+var wheelPositions = [4]Point3D{
+	{X: -trackWidthHalf, Y: 0.0, Z: wheelBaseHalf},  // 0: Links-voor
+	{X: trackWidthHalf, Y: 0.0, Z: wheelBaseHalf},   // 1: Rechts-voor
+	{X: -trackWidthHalf, Y: 0.0, Z: -wheelBaseHalf}, // 2: Links-achter
+	{X: trackWidthHalf, Y: 0.0, Z: -wheelBaseHalf},  // 3: Rechts-achter
 }
 
 type ZBotApp struct {
 	app          *app.Application
 	scene        *core.Node
+	world        *World
 	robot        *core.Node
 	floor        *graphic.Lines
 	chassis      *graphic.Mesh
@@ -54,6 +56,7 @@ type ZBotApp struct {
 	sideArmR     *core.Node
 	wheelSteer   [4]*core.Node
 	wheelRoll    [4]*core.Node
+	wheelYaw     [4]float32
 	wheelRollAng [4]float32
 	mode         int // 0: Ingeklapt, 1: SUV/Werkplatform, 2: Volledig Uitgeklapt, 3: Hand-locomotie
 }
@@ -94,48 +97,47 @@ func main() {
 	application.Subscribe(window.OnWindowSize, onResize)
 	onResize("", nil)
 
-	ambLight := light.NewAmbient(&math32.Color{R: 0.3, G: 0.3, B: 0.3}, 1.0)
+	ambLight := light.NewAmbient(&math32.Color{R: 0.35, G: 0.35, B: 0.35}, 1.0)
 	scene.Add(ambLight)
-	dirLight := light.NewDirectional(&math32.Color{R: 0.8, G: 0.8, B: 0.8}, 1.0)
-	dirLight.SetPosition(5, 10, 7)
+	dirLight := light.NewDirectional(&math32.Color{R: 0.85, G: 0.85, B: 0.85}, 1.0)
+	SetNodePosition(dirLight, Point3D{X: 5, Y: 10, Z: 7})
 	scene.Add(dirLight)
 
 	zApp := &ZBotApp{
 		app:   application,
 		scene: scene,
+		world: NewWorld(scene),
 		mode:  0,
 	}
 
-	// 3. Bouw de vloer en de Z-Bot hiërarchie
+	// 3. Bouw de vloer, de Z-Bot hiërarchie en de wereldobjecten
 	zApp.BuildFloor()
 	zApp.BuildZBot()
+	zApp.world.Build()
 
 	// 4. Muisbesturing voor de camera
 	var (
 		camYaw       float32 = math.Pi - 0.35 // Start schuin achter de robot
 		camPitch     float32 = 0.45
-		camDistance  float32 = 6.5
+		camDistance  float32 = 7.5
 		cameraFrozen         = false
 		hasCursorPos         = false
 		lastCursorX  float32
 		lastCursorY  float32
 	)
 
+	upAxis := Point3D{X: 0, Y: 1, Z: 0}
+
 	updateCamera := func() {
-		robotPos := zApp.robot.Position()
-		target := math32.Vector3{
-			X: robotPos.X,
-			Y: robotPos.Y + 0.6, // Centrum van de robot
-			Z: robotPos.Z,
-		}
+		robotCenter := GetNodePosition(zApp.robot).Add(Point3D{Y: 0.6})
 
-		cosPitch := math32.Cos(camPitch)
-		camX := target.X + camDistance*cosPitch*math32.Sin(camYaw)
-		camY := target.Y + camDistance*math32.Sin(camPitch)
-		camZ := target.Z + camDistance*cosPitch*math32.Cos(camYaw)
+		qYaw := NewQuatFromAxisAngle(Point3D{Y: 1}, camYaw)
+		qPitch := NewQuatFromAxisAngle(Point3D{X: 1}, -camPitch)
+		camOffset := qYaw.Mul(qPitch).Rotate(Point3D{Z: camDistance})
+		camPos := robotCenter.Add(camOffset)
 
-		cam.SetPosition(camX, camY, camZ)
-		cam.LookAt(&target, &math32.Vector3{X: 0, Y: 1, Z: 0})
+		SetNodePosition(cam, camPos)
+		cam.LookAt(robotCenter.ToMath32(), upAxis.ToMath32())
 	}
 	updateCamera()
 
@@ -198,7 +200,7 @@ func main() {
 		updateCamera()
 	})
 
-	// 5. Toetsenbord-interactie (modi + rijden/sturen)
+	// 5. Toetsenbord-interactie (modi + rijden/strafen/sturen + wireframe toggle)
 	keysDown := make(map[window.Key]bool)
 	shiftHeld := false
 
@@ -222,34 +224,20 @@ func main() {
 			zApp.setMode(2) // Volledig Uitgeklapt Bimanual Mode
 		case window.Key4:
 			zApp.setMode(3) // Hand-locomotie Mode
+		case window.KeyM:
+			zApp.world.ToggleWireframe()
 		}
 	})
 
-	// Robot bewegingsstatus (met traagheid)
+	// Robot bewegingsstatus (met traagheid in zowel vooruit/achteruit als links/rechts)
 	var (
-		robotX         float32
-		robotZ         float32
-		robotHeading   float32
-		currentSpeed   float32 // Lineaire rijsnelheid (vooruit/achteruit)
-		currentSteer   float32 // Huidige 4WS stuurhoek tijdens rijden
-		currentSpin    float32 // Huidige draaisnelheid bij stilstaan
-		pointTurnBlend float32 // 0 = rijden (4WS), 1 = draaien rond middelpunt
+		robotPos     Point3D
+		robotHeading float32
+		velForward   float32 // Lokale snelheid langs de Z-as (W/S)
+		velStrafe    float32 // Lokale snelheid langs de X-as (Q/E)
+		currentSteer float32 // Huidige 4WS stuurhoek
+		currentSpin  float32 // Huidige draaisnelheid
 	)
-
-	// Vooraf berekende raaklijn-stuurhoeken voor draaien rond het middelpunt
-	var pointTurnAngles [4]float32
-	var pointTurnRollSign [4]float32
-	wheelCenterDist := math32.Sqrt(trackWidthHalf*trackWidthHalf + wheelBaseHalf*wheelBaseHalf)
-	for i, pos := range wheelPositions {
-		wx, wz := pos[0], pos[2]
-		if wx <= 0 {
-			pointTurnAngles[i] = math32.Atan2(wz, -wx)
-			pointTurnRollSign[i] = 1.0
-		} else {
-			pointTurnAngles[i] = math32.Atan2(-wz, wx)
-			pointTurnRollSign[i] = -1.0
-		}
-	}
 
 	// 6. Render loop / update
 	application.Run(func(rend *renderer.Renderer, deltaTime time.Duration) {
@@ -258,21 +246,38 @@ func main() {
 			dt = 0.05
 		}
 
-		// Lees rij- en stuurinvoer (W/S en A/D)
-		var driveInput float32
+		// Lees rij-invoer vooruit/achteruit (W/S) en links/rechts (Q/E)
+		var forwardInput float32
 		if keysDown[window.KeyW] {
-			driveInput += 1.0
+			forwardInput += 1.0
 		}
 		if keysDown[window.KeyS] {
-			driveInput -= 1.0
+			forwardInput -= 1.0
+		}
+
+		var strafeInput float32
+		if keysDown[window.KeyQ] {
+			strafeInput += 1.0 // Links (+X in lokaal robotstelsel)
+		}
+		if keysDown[window.KeyE] {
+			strafeInput -= 1.0 // Rechts (-X in lokaal robotstelsel)
 		}
 
 		var steerInput float32
 		if keysDown[window.KeyA] {
-			steerInput += 1.0 // Links sturen (+Y rotatie)
+			steerInput += 1.0 // Links draaien (+Y rotatie)
 		}
 		if keysDown[window.KeyD] {
-			steerInput -= 1.0 // Rechts sturen (-Y rotatie)
+			steerInput -= 1.0 // Rechts draaien (-Y rotatie)
+		}
+
+		// Normaliseer gecombineerde diagonale invoer (bijv. Q+W) zodat de totale rijsnelheid klopt
+		inputMag := math32.Sqrt(forwardInput*forwardInput + strafeInput*strafeInput)
+		normForward := forwardInput
+		normStrafe := strafeInput
+		if inputMag > 1.0 {
+			normForward /= inputMag
+			normStrafe /= inputMag
 		}
 
 		// Bepaal doelsnelheid (fast met Shift, normal zonder Shift, 0 bij loslaten)
@@ -282,74 +287,106 @@ func main() {
 			maxSpeed = fastDriveMax
 			maxSpin = fastSpinMax
 		}
-		targetSpeed := driveInput * maxSpeed
 
-		// Pas lineaire traagheid toe (fast <-> normal <-> zero)
-		rate := driveDecel
-		if math32.Abs(targetSpeed) > math32.Abs(currentSpeed) && targetSpeed*currentSpeed >= 0 {
-			rate = driveAccel
-		} else if targetSpeed*currentSpeed < 0 {
-			rate = driveAccel + driveDecel
+		targetForward := normForward * maxSpeed
+		targetStrafe := normStrafe * maxSpeed
+
+		// Pas 2D lineaire traagheid toe (fast <-> normal <-> zero)
+		accelComponent := func(cur, target float32) float32 {
+			r := driveDecel
+			if math32.Abs(target) > math32.Abs(cur) && target*cur >= 0 {
+				r = driveAccel
+			} else if target*cur < 0 {
+				r = driveAccel + driveDecel
+			}
+			return moveToward(cur, target, r*dt)
 		}
-		currentSpeed = moveToward(currentSpeed, targetSpeed, rate*dt)
+		velForward = accelComponent(velForward, targetForward)
+		velStrafe = accelComponent(velStrafe, targetStrafe)
 
-		// Speciale modus: als de robot niet rijdt, draait hij rond zijn middelpunt
-		isStationary := math32.Abs(currentSpeed) < 0.08 && driveInput == 0
-		var targetPointBlend float32
-		var targetSpin float32
-		if isStationary && (steerInput != 0 || math32.Abs(currentSpin) > 0.01) {
-			targetPointBlend = 1.0
-			targetSpin = steerInput * maxSpin
-		}
+		totalSpeed := math32.Sqrt(velForward*velForward + velStrafe*velStrafe)
+		isDriving := totalSpeed >= 0.08 || inputMag > 0
 
-		pointTurnBlend = moveToward(pointTurnBlend, targetPointBlend, 4.0*dt)
-		currentSpin = moveToward(currentSpin, targetSpin, spinAccel*dt)
-
-		// Normale 4WS stuurhoek bij rijden
+		// Stuurgedrag: tijdens rijden vs. stilstaan (draaien rond het middelpunt)
 		targetSteer := steerInput * maxSteerAngle
-		if isStationary {
+		if !isDriving {
 			targetSteer = 0
 		}
 		currentSteer = moveToward(currentSteer, targetSteer, steerRate*dt)
 
-		// Werk positie en oriëntatie van de robot bij
+		targetSpin := steerInput * maxSpin
+		if steerInput == 0 {
+			targetSpin = 0
+		}
+		currentSpin = moveToward(currentSpin, targetSpin, spinAccel*dt)
+
 		var angularVel float32
-		if pointTurnBlend > 0.5 && math32.Abs(currentSpeed) < 0.08 {
+		if !isDriving {
+			// Speciale modus: niet rijden -> draai rond het middelpunt van de robot
 			angularVel = currentSpin
 		} else {
-			// 4-wiel besturing: grotere draaicirkel-respons door tegengesteld sturende achterwielen
-			angularVel = (currentSpeed / wheelBaseHalf) * math32.Tan(currentSteer)
+			// Tijdens rijden: 4WS bochtgedrag gecombineerd met draaien bij zijwaarts rijden
+			driveTurn := (velForward / wheelBaseHalf) * math32.Tan(currentSteer)
+			strafeTurn := currentSpin
+			forwardRatio := float32(0)
+			if totalSpeed > 0.001 {
+				forwardRatio = math32.Abs(velForward) / totalSpeed
+			}
+			angularVel = lerp(strafeTurn, driveTurn, forwardRatio)
 		}
 
+		// Werk positie en oriëntatie van de robot bij via quaternionrotatie
 		robotHeading += angularVel * dt
-		forwardX := math32.Sin(robotHeading)
-		forwardZ := math32.Cos(robotHeading)
-		robotX += forwardX * currentSpeed * dt
-		robotZ += forwardZ * currentSpeed * dt
+		robotQuat := NewQuatFromAxisAngle(Point3D{Y: 1}, robotHeading)
+		localVel := Point3D{X: velStrafe, Y: 0, Z: velForward}
+		worldVel := robotQuat.Rotate(localVel)
+		robotPos = robotPos.Add(worldVel.Scale(dt))
 
-		zApp.robot.SetPosition(robotX, 0, robotZ)
-		zApp.robot.SetRotationY(robotHeading)
+		SetNodePosition(zApp.robot, robotPos)
+		SetNodeRotation(zApp.robot, robotQuat)
 
-		// Werk stuurhoek en rolbeweging van alle 4 wielen bij
+		// Bereken voor elk wiel de exacte lokale snelheidsvector (translatie + rotatie)
+		// zodat alle 4 wielen in de gereden richting sturen én rollen
 		for i := 0; i < 4; i++ {
-			driveWheelYaw := currentSteer
-			if i >= 2 {
-				// Achterwielen sturen tegengesteld (4-wheel steering)
-				driveWheelYaw = -currentSteer
-			}
-			wheelYaw := lerp(driveWheelYaw, pointTurnAngles[i], pointTurnBlend)
-			zApp.wheelSteer[i].SetRotationY(wheelYaw)
+			wp := wheelPositions[i]
 
-			// Rol-snelheid van dit wiel in de gereden richting
-			rimSpeed := currentSpeed + pointTurnRollSign[i]*currentSpin*wheelCenterDist*pointTurnBlend
+			// v_wiel = v_robot + omega x r_wiel
+			wheelVel := Point3D{
+				X: velStrafe + angularVel*wp.Z,
+				Y: 0,
+				Z: velForward - angularVel*wp.X,
+			}
+			wheelSpeed := wheelVel.Length()
+
+			targetYaw := float32(0)
+			if wheelSpeed > 0.02 {
+				if wheelVel.Z >= 0 {
+					targetYaw = math32.Atan2(wheelVel.X, wheelVel.Z)
+				} else {
+					targetYaw = math32.Atan2(-wheelVel.X, -wheelVel.Z)
+				}
+			}
+
+			zApp.wheelYaw[i] = moveToward(zApp.wheelYaw[i], targetYaw, wheelPivotRate*dt)
+			steerQuat := NewQuatFromAxisAngle(Point3D{Y: 1}, zApp.wheelYaw[i])
+			SetNodeRotation(zApp.wheelSteer[i], steerQuat)
+
+			// Projecteer de wielsnelheid op de huidige rolrichting van het wiel
+			rollDir := steerQuat.Rotate(Point3D{Z: 1})
+			rimSpeed := wheelVel.Dot(rollDir)
+
 			zApp.wheelRollAng[i] += (rimSpeed / wheelRadius) * dt
-			zApp.wheelRoll[i].SetRotationX(zApp.wheelRollAng[i])
+			rollQuat := NewQuatFromAxisAngle(Point3D{X: 1}, zApp.wheelRollAng[i])
+			SetNodeRotation(zApp.wheelRoll[i], rollQuat)
 		}
 
 		// Houd de oneindige groene rastervloer gecentreerd onder de robot
-		snapX := float32(math.Floor(float64(robotX/gridCellSize))) * gridCellSize
-		snapZ := float32(math.Floor(float64(robotZ/gridCellSize))) * gridCellSize
-		zApp.floor.SetPosition(snapX, floorY, snapZ)
+		floorPos := Point3D{
+			X: float32(math.Floor(float64(robotPos.X/gridCellSize))) * gridCellSize,
+			Y: floorY,
+			Z: float32(math.Floor(float64(robotPos.Z/gridCellSize))) * gridCellSize,
+		}
+		SetNodePosition(zApp.floor, floorPos)
 
 		if !cameraFrozen {
 			updateCamera()
@@ -364,13 +401,17 @@ func (z *ZBotApp) BuildFloor() {
 	geom := geometry.NewGeometry()
 	positions := math32.NewArrayF32(0, 0)
 
+	appendSegment := func(a, b Point3D) {
+		positions.Append(a.X, a.Y, a.Z, b.X, b.Y, b.Z)
+	}
+
 	extent := float32(gridHalfCount) * gridCellSize
 	for i := -gridHalfCount; i <= gridHalfCount; i++ {
 		offset := float32(i) * gridCellSize
 		// Lijn parallel aan de Z-as
-		positions.Append(offset, 0, -extent, offset, 0, extent)
+		appendSegment(Point3D{X: offset, Z: -extent}, Point3D{X: offset, Z: extent})
 		// Lijn parallel aan de X-as
-		positions.Append(-extent, 0, offset, extent, 0, offset)
+		appendSegment(Point3D{X: -extent, Z: offset}, Point3D{X: extent, Z: offset})
 	}
 
 	geom.AddVBO(gls.NewVBO(positions).AddAttrib(gls.VertexPosition))
@@ -380,7 +421,7 @@ func (z *ZBotApp) BuildFloor() {
 	matFloor.SetEmissiveColor(green)
 
 	z.floor = graphic.NewLines(geom, matFloor)
-	z.floor.SetPosition(0, floorY, 0)
+	SetNodePosition(z.floor, Point3D{Y: floorY})
 	z.scene.Add(z.floor)
 }
 
@@ -396,7 +437,7 @@ func (z *ZBotApp) BuildZBot() {
 	// --- A. Basis Chassis (Skateboard Bakje) ---
 	chassisGeom := geometry.NewBox(1.2, 0.3, 2.0)
 	z.chassis = graphic.NewMesh(chassisGeom, matChassis)
-	z.chassis.SetPosition(0, 0.15, 0)
+	SetNodePosition(z.chassis, Point3D{Y: 0.15})
 	z.robot.Add(z.chassis)
 
 	// Wielen (4 stuks met stuur- en rolhiërarchie + zichtbare spaak)
@@ -404,16 +445,17 @@ func (z *ZBotApp) BuildZBot() {
 	spokeGeom := geometry.NewBox(0.11, wheelRadius*1.8, 0.03)
 	matWheel := material.NewStandard(&math32.Color{R: 0.1, G: 0.1, B: 0.1})
 	matSpoke := material.NewStandard(&math32.Color{R: 0.85, G: 0.85, B: 0.85})
+	wheelAlignQuat := NewQuatFromAxisAngle(Point3D{Z: 1}, math.Pi/2)
 
 	for i, pos := range wheelPositions {
 		steerNode := core.NewNode()
-		steerNode.SetPosition(pos[0], pos[1], pos[2])
+		SetNodePosition(steerNode, pos)
 
 		rollNode := core.NewNode()
 		steerNode.Add(rollNode)
 
 		wheel := graphic.NewMesh(wheelGeom, matWheel)
-		wheel.SetRotationZ(math.Pi / 2)
+		SetNodeRotation(wheel, wheelAlignQuat)
 		rollNode.Add(wheel)
 
 		spoke := graphic.NewMesh(spokeGeom, matSpoke)
@@ -428,13 +470,13 @@ func (z *ZBotApp) BuildZBot() {
 	z.centralArm = core.NewNode()
 	centralGeom := geometry.NewBox(0.3, 1.2, 0.3)
 	centralMesh := graphic.NewMesh(centralGeom, matArm)
-	centralMesh.SetPosition(0, 0.6, 0)
+	SetNodePosition(centralMesh, Point3D{Y: 0.6})
 	z.centralArm.Add(centralMesh)
 
 	// Sensor Head op de top van de centrale stam
 	sensorGeom := geometry.NewBox(0.25, 0.2, 0.25)
 	sensorMesh := graphic.NewMesh(sensorGeom, matSensor)
-	sensorMesh.SetPosition(0, 1.3, 0)
+	SetNodePosition(sensorMesh, Point3D{Y: 1.3})
 	z.centralArm.Add(sensorMesh)
 
 	z.robot.Add(z.centralArm)
@@ -443,14 +485,14 @@ func (z *ZBotApp) BuildZBot() {
 	z.sideArmL = core.NewNode()
 	sideGeomL := geometry.NewBox(0.2, 1.0, 0.2)
 	sideMeshL := graphic.NewMesh(sideGeomL, matArm)
-	sideMeshL.SetPosition(-0.3, 0.5, 0)
+	SetNodePosition(sideMeshL, Point3D{X: -0.3, Y: 0.5})
 	z.sideArmL.Add(sideMeshL)
 	z.centralArm.Add(z.sideArmL)
 
 	z.sideArmR = core.NewNode()
 	sideGeomR := geometry.NewBox(0.2, 1.0, 0.2)
 	sideMeshR := graphic.NewMesh(sideGeomR, matArm)
-	sideMeshR.SetPosition(0.3, 0.5, 0)
+	SetNodePosition(sideMeshR, Point3D{X: 0.3, Y: 0.5})
 	z.sideArmR.Add(sideMeshR)
 	z.centralArm.Add(z.sideArmR)
 
@@ -462,26 +504,32 @@ func (z *ZBotApp) setMode(newMode int) {
 	z.mode = newMode
 	switch z.mode {
 	case 0: // Ingeklapt (Nesting in bakje)
-		z.centralArm.SetPosition(0, 0, 0)
-		z.centralArm.SetRotation(0, 0, 0)
-		z.sideArmL.SetPosition(0, 0, 0)
-		z.sideArmR.SetPosition(0, 0, 0)
+		SetNodePosition(z.centralArm, Point3D{})
+		SetNodeRotation(z.centralArm, IdentityQuat())
+		SetNodePosition(z.sideArmL, Point3D{})
+		SetNodeRotation(z.sideArmL, IdentityQuat())
+		SetNodePosition(z.sideArmR, Point3D{})
+		SetNodeRotation(z.sideArmR, IdentityQuat())
 	case 1: // SUV / Werkplatform Mode
-		z.centralArm.SetPosition(0, 0.3, -0.5)
-		z.centralArm.SetRotation(0.3, 0, 0)
-		z.sideArmL.SetPosition(-0.4, 0.8, 0)
-		z.sideArmR.SetPosition(0.4, 0.8, 0)
+		SetNodePosition(z.centralArm, Point3D{Y: 0.3, Z: -0.5})
+		SetNodeRotation(z.centralArm, NewQuatFromAxisAngle(Point3D{X: 1}, 0.3))
+		SetNodePosition(z.sideArmL, Point3D{X: -0.4, Y: 0.8})
+		SetNodeRotation(z.sideArmL, IdentityQuat())
+		SetNodePosition(z.sideArmR, Point3D{X: 0.4, Y: 0.8})
+		SetNodeRotation(z.sideArmR, IdentityQuat())
 	case 2: // Volledig Uitgeklapt Bimanual Mode
-		z.centralArm.SetPosition(0, 0.5, 0)
-		z.centralArm.SetRotation(0, 0, 0)
-		z.sideArmL.SetPosition(-0.8, 1.2, 0.2)
-		z.sideArmL.SetRotation(0, 0, -0.5)
-		z.sideArmR.SetPosition(0.8, 1.2, 0.2)
-		z.sideArmR.SetRotation(0, 0, 0.5)
+		SetNodePosition(z.centralArm, Point3D{Y: 0.5})
+		SetNodeRotation(z.centralArm, IdentityQuat())
+		SetNodePosition(z.sideArmL, Point3D{X: -0.8, Y: 1.2, Z: 0.2})
+		SetNodeRotation(z.sideArmL, NewQuatFromAxisAngle(Point3D{Z: 1}, -0.5))
+		SetNodePosition(z.sideArmR, Point3D{X: 0.8, Y: 1.2, Z: 0.2})
+		SetNodeRotation(z.sideArmR, NewQuatFromAxisAngle(Point3D{Z: 1}, 0.5))
 	case 3: // Hand-locomotie Mode (op de handen lopen)
-		z.centralArm.SetPosition(0, 1.0, 0)
-		z.centralArm.SetRotation(-0.5, 0, 0)
-		z.sideArmL.SetPosition(-0.6, 0, 1.5)
-		z.sideArmR.SetPosition(0.6, 0, 1.5)
+		SetNodePosition(z.centralArm, Point3D{Y: 1.0})
+		SetNodeRotation(z.centralArm, NewQuatFromAxisAngle(Point3D{X: 1}, -0.5))
+		SetNodePosition(z.sideArmL, Point3D{X: -0.6, Z: 1.5})
+		SetNodeRotation(z.sideArmL, IdentityQuat())
+		SetNodePosition(z.sideArmR, Point3D{X: 0.6, Z: 1.5})
+		SetNodeRotation(z.sideArmR, IdentityQuat())
 	}
 }
