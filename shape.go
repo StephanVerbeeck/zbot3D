@@ -86,6 +86,7 @@ func GetNodePosition(node interface{ Position() math32.Vector3 }) Point3D {
 
 // Shape is a 3D closed object built by rotating and/or laterally shifting 2D lines over N steps.
 // When multiple lines are provided, step k selects lines[k % len(lines)].
+// For each step s, the lateral shift distance is shiftDist[s % len(shiftDist)].
 // It embeds core.Node at (0, 0, 0) so it can be placed directly in a scene and attached to Mounts later.
 type Shape struct {
 	core.Node
@@ -93,7 +94,7 @@ type Shape struct {
 	Lines     [][]Point2D        // One or more 2D XY polyline coordinates (cycled via step % len(Lines))
 	Steps     int                // Number of rotation/shift steps N
 	Rotate    bool               // Rotate 1/N of a full turn around the length axis per step
-	ShiftDist float32            // Lateral shift distance per step in the current shift direction
+	ShiftDist []float32          // Lateral shift distances per step (cycled via step % len(ShiftDist))
 	CloseEnds bool               // Automatically close open ends into a solid volume
 	Wireframe bool               // When true, display only as a mesh of lines (false by default)
 	Material  material.IMaterial // Surface material for the closed solid shape
@@ -107,9 +108,10 @@ type triangle3D struct {
 }
 
 // NewShape creates a new 3D Shape positioned at (0, 0, 0) with Wireframe=false by default.
+// For each step s, the shift distance is shiftDist[s % len(shiftDist)] (or 0 if shiftDist is empty).
 // One or more 2D lines can be passed at the end; shorter lines are extended to match the
 // longest line by repeating each point, and during stepping step k uses lines[k % len(lines)].
-func NewShape(steps int, rotate bool, shiftDist float32, mat material.IMaterial, lines ...[]Point2D) *Shape {
+func NewShape(steps int, rotate bool, shiftDist []float32, mat material.IMaterial, lines ...[]Point2D) *Shape {
 	// Determine which line has the most points
 	maxPts := 0
 	for _, ln := range lines {
@@ -124,11 +126,17 @@ func NewShape(steps int, rotate bool, shiftDist float32, mat material.IMaterial,
 		extendedLines[idx] = extendLineByRepeating(ln, maxPts)
 	}
 
+	var shifts []float32
+	if len(shiftDist) > 0 {
+		shifts = make([]float32, len(shiftDist))
+		copy(shifts, shiftDist)
+	}
+
 	s := &Shape{
 		Lines:     extendedLines,
 		Steps:     steps,
 		Rotate:    rotate,
-		ShiftDist: shiftDist,
+		ShiftDist: shifts,
 		CloseEnds: true,
 		Wireframe: false,
 		Material:  mat,
@@ -218,6 +226,14 @@ func (s *Shape) Rebuild() {
 		dTheta = (2.0 * math.Pi) / float32(steps)
 	}
 
+	hasShift := false
+	for _, d := range s.ShiftDist {
+		if math32.Abs(d) > 1e-7 {
+			hasShift = true
+			break
+		}
+	}
+
 	lengthAxis := Point3D{X: 0, Y: 1, Z: 0}
 	baseShiftDir := Point3D{X: 0, Y: 0, Z: 1}
 
@@ -225,14 +241,18 @@ func (s *Shape) Rebuild() {
 	rings := make([][]Point3D, steps+1)
 	framePos := Point3D{}
 	lineCount := len(normLines)
+	shiftCount := len(s.ShiftDist)
 
 	for k := 0; k <= steps; k++ {
 		theta := float32(k) * dTheta
 		qStep := NewQuatFromAxisAngle(lengthAxis, theta)
 
-		if k > 0 && s.ShiftDist != 0 {
-			shiftDir := qStep.Rotate(baseShiftDir)
-			framePos = framePos.Add(shiftDir.Scale(s.ShiftDist))
+		if k > 0 && shiftCount > 0 {
+			dist := s.ShiftDist[(k-1)%shiftCount]
+			if dist != 0 {
+				shiftDir := qStep.Rotate(baseShiftDir)
+				framePos = framePos.Add(shiftDir.Scale(dist))
+			}
 		}
 
 		lineIdx := k % lineCount
@@ -323,7 +343,7 @@ func (s *Shape) Rebuild() {
 		profileClosed := dist2D(firstLine[0], firstLine[maxPts-1]) < 1e-5
 
 		if !s.Rotate {
-			// Pure lateral shift (e.g. rectangular prism): cap front (k=0) and back (k=steps) faces
+			// Pure lateral shift (e.g. rectangular prism, extruded pillar): cap front (k=0) and back (k=steps) faces
 			startIndices := triangulatePolygon2D(firstLine)
 			for idx := 0; idx+2 < len(startIndices); idx += 3 {
 				i0, i1, i2 := startIndices[idx], startIndices[idx+1], startIndices[idx+2]
@@ -335,7 +355,7 @@ func (s *Shape) Rebuild() {
 				i0, i1, i2 := endIndices[idx], endIndices[idx+1], endIndices[idx+2]
 				addTri(rings[steps][i0], rings[steps][i1], rings[steps][i2])
 			}
-		} else if s.ShiftDist == 0 {
+		} else if !hasShift {
 			// Pure rotation around Y-axis: cap open top/bottom edges to the rotation axis
 			hasOpenStart := false
 			for _, ln := range normLines {
@@ -373,6 +393,18 @@ func (s *Shape) Rebuild() {
 				p01 := rings[k][0]
 				addTri(p00, p01, p11)
 				addTri(p00, p11, p10)
+			}
+		} else if rings[0][0].Sub(rings[steps][0]).Length() > 1e-3 {
+			// Open-ended arc/helical sweep with a closed cross-section: cap both ends
+			startIndices := triangulatePolygon2D(firstLine)
+			for idx := 0; idx+2 < len(startIndices); idx += 3 {
+				i0, i1, i2 := startIndices[idx], startIndices[idx+1], startIndices[idx+2]
+				addTri(rings[0][i0], rings[0][i2], rings[0][i1])
+			}
+			endIndices := triangulatePolygon2D(endLine)
+			for idx := 0; idx+2 < len(endIndices); idx += 3 {
+				i0, i1, i2 := endIndices[idx], endIndices[idx+1], endIndices[idx+2]
+				addTri(rings[steps][i0], rings[steps][i1], rings[steps][i2])
 			}
 		}
 	}
