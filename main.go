@@ -224,6 +224,8 @@ func main() {
 			zApp.setMode(2) // Volledig Uitgeklapt Bimanual Mode
 		case window.Key4:
 			zApp.setMode(3) // Hand-locomotie Mode
+		case window.KeyF:
+			application.SetFullScreen(!application.FullScreen())
 		case window.KeyM:
 			zApp.world.ToggleWireframe()
 		}
