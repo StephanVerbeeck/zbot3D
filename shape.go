@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/g3n/engine/core"
@@ -73,9 +74,7 @@ func Point3DFromMath32(v math32.Vector3) Point3D {
 }
 
 // SetNodePosition sets a G3N node's position from a Point3D.
-func SetNodePosition(node interface {
-	SetPosition(float32, float32, float32)
-}, p Point3D) {
+func SetNodePosition(node interface{ SetPosition(float32, float32, float32) }, p Point3D) {
 	node.SetPosition(p.X, p.Y, p.Z)
 }
 
@@ -84,17 +83,180 @@ func GetNodePosition(node interface{ Position() math32.Vector3 }) Point3D {
 	return Point3DFromMath32(node.Position())
 }
 
-// Shape is a 3D closed object built by rotating and/or laterally shifting 2D lines over N steps.
+// ShapeInfo holds all parameters needed to call NewShape, plus a descriptive Name
+// and a 3D post-construction scale applied in New().
+type ShapeInfo struct {
+	Name       string
+	Material   material.IMaterial
+	Steps      int
+	Rotate     []float32
+	Move       []float32
+	Lines      [][]Point2D
+	ShapeScale Point3D // 3D scale applied to the finished Shape in New() (unset {0,0,0} defaults to {1,1,1})
+	hasScale3D bool
+}
+
+func (si ShapeInfo) effectiveScale3D() Point3D {
+	if !si.hasScale3D && si.ShapeScale == (Point3D{}) {
+		return Point3D{X: 1, Y: 1, Z: 1}
+	}
+	return si.ShapeScale
+}
+
+// New constructs a *Shape from the parameters stored in ShapeInfo and applies any 3D ShapeScale.
+func (si ShapeInfo) New() *Shape {
+	s := NewShape(si.Material, si.Steps, si.Rotate, si.Move, si.Lines...)
+	sc := si.effectiveScale3D()
+	if sc.X != 1.0 || sc.Y != 1.0 || sc.Z != 1.0 {
+		s.SetScale(sc.X, sc.Y, sc.Z)
+	}
+	return s
+}
+
+// Scale scales s into si and returns si:
+//   - x2, y2 scale the 2D line X and Y points
+//   - z2 scales the Move distances
+//   - x3, y3, z3 scale the finished constructed Shape before it is returned by New()
+//
+// All parameters are required; pass 1.0 for any scale factor that is not used.
+func (si *ShapeInfo) Scale(s *ShapeInfo, x2, y2, z2, x3, y3, z3 float32) *ShapeInfo {
+	if s == nil {
+		panic("ShapeInfo.Scale: s must not be nil")
+	}
+
+	si.Name = s.Name
+	si.Material = s.Material
+	si.Steps = s.Steps
+
+	if len(s.Rotate) > 0 {
+		rot := make([]float32, len(s.Rotate))
+		copy(rot, s.Rotate)
+		si.Rotate = rot
+	} else {
+		si.Rotate = nil
+	}
+
+	if len(s.Move) > 0 {
+		mv := make([]float32, len(s.Move))
+		for i, m := range s.Move {
+			mv[i] = m * z2
+		}
+		si.Move = mv
+	} else {
+		si.Move = nil
+	}
+
+	if len(s.Lines) > 0 {
+		lines := make([][]Point2D, len(s.Lines))
+		for i, ln := range s.Lines {
+			lines[i] = LineScale(ln, x2, y2)
+		}
+		si.Lines = lines
+	} else {
+		si.Lines = nil
+	}
+
+	base3D := s.effectiveScale3D()
+	si.ShapeScale = Point3D{
+		X: base3D.X * x3,
+		Y: base3D.Y * y3,
+		Z: base3D.Z * z3,
+	}
+	si.hasScale3D = true
+
+	return si
+}
+
+// Lerp linearly interpolates all fields between s1 and s2 at factor ratio (0.0 = s1, 1.0 = s2),
+// writing the result into si and returning si.
+// Any variable-length arrays (Rotate, Move, Lines, and each polyline in Lines) must have equal lengths in s1 and s2.
+func (si *ShapeInfo) Lerp(s1, s2 *ShapeInfo, ratio float32) *ShapeInfo {
+	if s1 == nil || s2 == nil {
+		panic("ShapeInfo.Lerp: s1 and s2 must not be nil")
+	}
+	if len(s1.Rotate) != len(s2.Rotate) {
+		panic(fmt.Sprintf("ShapeInfo.Lerp: Rotate length mismatch (%d != %d)", len(s1.Rotate), len(s2.Rotate)))
+	}
+	if len(s1.Move) != len(s2.Move) {
+		panic(fmt.Sprintf("ShapeInfo.Lerp: Move length mismatch (%d != %d)", len(s1.Move), len(s2.Move)))
+	}
+	if len(s1.Lines) != len(s2.Lines) {
+		panic(fmt.Sprintf("ShapeInfo.Lerp: Lines count mismatch (%d != %d)", len(s1.Lines), len(s2.Lines)))
+	}
+	for i := range s1.Lines {
+		if len(s1.Lines[i]) != len(s2.Lines[i]) {
+			panic(fmt.Sprintf("ShapeInfo.Lerp: Lines[%d] length mismatch (%d != %d)", i, len(s1.Lines[i]), len(s2.Lines[i])))
+		}
+	}
+
+	if ratio <= 0.5 {
+		si.Name = s1.Name
+		si.Material = s1.Material
+	} else {
+		si.Name = s2.Name
+		si.Material = s2.Material
+	}
+
+	si.Steps = int(math.Round(float64(s1.Steps) + float64(s2.Steps-s1.Steps)*float64(ratio)))
+
+	if len(s1.Rotate) > 0 {
+		si.Rotate = make([]float32, len(s1.Rotate))
+		for i := range s1.Rotate {
+			si.Rotate[i] = s1.Rotate[i] + (s2.Rotate[i]-s1.Rotate[i])*ratio
+		}
+	} else {
+		si.Rotate = nil
+	}
+
+	if len(s1.Move) > 0 {
+		si.Move = make([]float32, len(s1.Move))
+		for i := range s1.Move {
+			si.Move[i] = s1.Move[i] + (s2.Move[i]-s1.Move[i])*ratio
+		}
+	} else {
+		si.Move = nil
+	}
+
+	if len(s1.Lines) > 0 {
+		si.Lines = make([][]Point2D, len(s1.Lines))
+		for i := range s1.Lines {
+			line := make([]Point2D, len(s1.Lines[i]))
+			for j := range s1.Lines[i] {
+				p1 := s1.Lines[i][j]
+				p2 := s2.Lines[i][j]
+				line[j] = Point2D{
+					X: p1.X + (p2.X-p1.X)*ratio,
+					Y: p1.Y + (p2.Y-p1.Y)*ratio,
+				}
+			}
+			si.Lines[i] = line
+		}
+	} else {
+		si.Lines = nil
+	}
+
+	sc1 := s1.effectiveScale3D()
+	sc2 := s2.effectiveScale3D()
+	si.ShapeScale = Point3D{
+		X: sc1.X + (sc2.X-sc1.X)*ratio,
+		Y: sc1.Y + (sc2.Y-sc1.Y)*ratio,
+		Z: sc1.Z + (sc2.Z-sc1.Z)*ratio,
+	}
+	si.hasScale3D = true
+
+	return si
+}
+
+// Shape is a 3D closed object built by rotating and/or laterally moving 2D lines over N steps.
 // When multiple lines are provided, step k selects lines[k % len(lines)].
-// For each step s, the lateral shift distance is shiftDist[s % len(shiftDist)].
-// It embeds core.Node at (0, 0, 0) so it can be placed directly in a scene and attached to Mounts later.
+// For each step s, rotation is rotate[s % len(rotate)] (in full turns 0..1) and lateral shift is move[s % len(move)].
 type Shape struct {
 	core.Node
 
 	Lines     [][]Point2D        // One or more 2D XY polyline coordinates (cycled via step % len(Lines))
-	Steps     int                // Number of rotation/shift steps N
-	Rotate    bool               // Rotate 1/N of a full turn around the length axis per step
-	ShiftDist []float32          // Lateral shift distances per step (cycled via step % len(ShiftDist))
+	Steps     int                // Number of rotation/move steps N
+	Rotate    []float32          // Rotations per step in turns (0.0..1.0), cycled via step % len(Rotate)
+	Move      []float32          // Lateral move distances per step, cycled via step % len(Move)
 	CloseEnds bool               // Automatically close open ends into a solid volume
 	Wireframe bool               // When true, display only as a mesh of lines (false by default)
 	Material  material.IMaterial // Surface material for the closed solid shape
@@ -109,10 +271,10 @@ type triangle3D struct {
 }
 
 // NewShape creates a new 3D Shape positioned at (0, 0, 0) with Wireframe=false by default.
-// For each step s, the shift distance is shiftDist[s % len(shiftDist)] (or 0 if shiftDist is empty).
-// One or more 2D lines can be passed at the end; shorter lines are extended to match the
-// longest line by repeating each point, and during stepping step k uses lines[k % len(lines)].
-func NewShape(steps int, rotate bool, shiftDist []float32, mat material.IMaterial, lines ...[]Point2D) *Shape {
+// `mat` sets the surface material (defaults to MatDefaultShape() if nil).
+// For each step s, rotation (in 0.0..1.0 turns) is rotate[s % len(rotate)] and lateral move is move[s % len(move)].
+// Elements beyond `steps` are not used. If both rotate and move are nil or empty, rotate defaults to 1.0/steps per step (1 full turn).
+func NewShape(mat material.IMaterial, steps int, rotate []float32, move []float32, lines ...[]Point2D) *Shape {
 	maxPts := 0
 	for _, ln := range lines {
 		if len(ln) > maxPts {
@@ -125,17 +287,23 @@ func NewShape(steps int, rotate bool, shiftDist []float32, mat material.IMateria
 		extendedLines[idx] = extendLineByRepeating(ln, maxPts)
 	}
 
-	var shifts []float32
-	if len(shiftDist) > 0 {
-		shifts = make([]float32, len(shiftDist))
-		copy(shifts, shiftDist)
+	var rotCopy []float32
+	if len(rotate) > 0 {
+		rotCopy = make([]float32, len(rotate))
+		copy(rotCopy, rotate)
+	}
+
+	var moveCopy []float32
+	if len(move) > 0 {
+		moveCopy = make([]float32, len(move))
+		copy(moveCopy, move)
 	}
 
 	s := &Shape{
 		Lines:     extendedLines,
 		Steps:     steps,
-		Rotate:    rotate,
-		ShiftDist: shifts,
+		Rotate:    rotCopy,
+		Move:      moveCopy,
 		CloseEnds: true,
 		Wireframe: false,
 		Material:  mat,
@@ -218,15 +386,33 @@ func (s *Shape) Rebuild() {
 		steps = 1
 	}
 
-	var dTheta float32
-	if s.Rotate {
-		dTheta = (2.0 * math.Pi) / float32(steps)
+	// Clamp effective rotate and move arrays so parts larger than `steps` are not used
+	effRotate := s.Rotate
+	if len(effRotate) > steps {
+		effRotate = effRotate[:steps]
+	}
+	effMove := s.Move
+	if len(effMove) > steps {
+		effMove = effMove[:steps]
 	}
 
-	hasShift := false
-	for _, d := range s.ShiftDist {
+	// Default: if both rotate and move are nil or empty, rotate N steps for 1 full rotation (1.0 turn)
+	if len(effRotate) == 0 && len(effMove) == 0 {
+		effRotate = []float32{1.0 / float32(steps)}
+	}
+
+	hasRotate := false
+	for _, r := range effRotate {
+		if math32.Abs(r) > 1e-7 {
+			hasRotate = true
+			break
+		}
+	}
+
+	hasMove := false
+	for _, d := range effMove {
 		if math32.Abs(d) > 1e-7 {
-			hasShift = true
+			hasMove = true
 			break
 		}
 	}
@@ -236,18 +422,26 @@ func (s *Shape) Rebuild() {
 
 	rings := make([][]Point3D, steps+1)
 	ringUVs := make([][]Point2D, steps+1)
+	rotTurnsAt := make([]float32, steps+1)
 	framePos := Point3D{}
 	lineCount := len(normLines)
-	shiftCount := len(s.ShiftDist)
+	rotCount := len(effRotate)
+	moveCount := len(effMove)
 
 	// Cumulative sweep progress for V texture coordinate
 	sweepPos := make([]float32, steps+1)
 	for k := 1; k <= steps; k++ {
+		stepIdx := k - 1
 		stepLen := float32(1.0) / float32(steps)
-		if shiftCount > 0 {
-			d := math32.Abs(s.ShiftDist[(k-1)%shiftCount])
+		if moveCount > 0 {
+			d := math32.Abs(effMove[stepIdx%moveCount])
 			if d > 1e-5 {
 				stepLen = d
+			}
+		} else if rotCount > 0 {
+			r := math32.Abs(effRotate[stepIdx%rotCount])
+			if r > 1e-5 {
+				stepLen = r
 			}
 		}
 		sweepPos[k] = sweepPos[k-1] + stepLen
@@ -257,12 +451,21 @@ func (s *Shape) Rebuild() {
 		totalSweep = 1.0
 	}
 
+	var cumRotTurns float32
 	for k := 0; k <= steps; k++ {
-		theta := float32(k) * dTheta
+		if k > 0 {
+			stepIdx := k - 1
+			if rotCount > 0 {
+				cumRotTurns += effRotate[stepIdx%rotCount]
+			}
+		}
+		rotTurnsAt[k] = cumRotTurns
+		theta := cumRotTurns * 2.0 * math.Pi
 		qStep := NewQuatFromAxisAngle(lengthAxis, theta)
 
-		if k > 0 && shiftCount > 0 {
-			dist := s.ShiftDist[(k-1)%shiftCount]
+		if k > 0 && moveCount > 0 {
+			stepIdx := k - 1
+			dist := effMove[stepIdx%moveCount]
 			if dist != 0 {
 				shiftDir := qStep.Rotate(baseShiftDir)
 				framePos = framePos.Add(shiftDir.Scale(dist))
@@ -270,7 +473,8 @@ func (s *Shape) Rebuild() {
 		}
 
 		lineIdx := k % lineCount
-		if k == steps && s.Rotate && steps%lineCount != 0 {
+		isFullRotation := math32.Abs(math32.Abs(cumRotTurns)-1.0) < 1e-4
+		if k == steps && isFullRotation && steps%lineCount != 0 {
 			lineIdx = 0
 		}
 		activeLine := normLines[lineIdx]
@@ -309,7 +513,7 @@ func (s *Shape) Rebuild() {
 		}
 	}
 
-	// 1. Build wireframe lines (uses NewWireframeMaterialFrom in material.go)
+	// 1. Build wireframe lines
 	linePositions := math32.NewArrayF32(0, 0)
 	for k := 0; k <= steps; k++ {
 		for i := 0; i < maxPts-1; i++ {
@@ -404,7 +608,7 @@ func (s *Shape) Rebuild() {
 		endLine := normLines[steps%lineCount]
 		profileClosed := dist2D(firstLine[0], firstLine[maxPts-1]) < 1e-5
 
-		if !s.Rotate {
+		if !hasRotate {
 			startUVs := capUVsForLine(firstLine)
 			startIndices := triangulatePolygon2D(firstLine)
 			for idx := 0; idx+2 < len(startIndices); idx += 3 {
@@ -418,7 +622,7 @@ func (s *Shape) Rebuild() {
 				i0, i1, i2 := endIndices[idx], endIndices[idx+1], endIndices[idx+2]
 				addTri(rings[steps][i0], rings[steps][i1], rings[steps][i2], endUVs[i0], endUVs[i1], endUVs[i2])
 			}
-		} else if !hasShift {
+		} else if !hasMove {
 			hasOpenStart := false
 			for _, ln := range normLines {
 				if math32.Abs(ln[0].X) > 1e-5 {
@@ -430,8 +634,8 @@ func (s *Shape) Rebuild() {
 				hubStart := Point3D{X: 0, Y: firstLine[0].Y, Z: 0}.Sub(origin)
 				hubUV := Point2D{X: 0.5, Y: 0.5}
 				for k := 0; k < steps; k++ {
-					a0 := float32(k) * dTheta
-					a1 := float32(k+1) * dTheta
+					a0 := rotTurnsAt[k] * 2.0 * math.Pi
+					a1 := rotTurnsAt[k+1] * 2.0 * math.Pi
 					u0 := Point2D{X: 0.5 + 0.5*math32.Cos(a0), Y: 0.5 + 0.5*math32.Sin(a0)}
 					u1 := Point2D{X: 0.5 + 0.5*math32.Cos(a1), Y: 0.5 + 0.5*math32.Sin(a1)}
 					addTri(hubStart, rings[k+1][0], rings[k][0], hubUV, u1, u0)
@@ -449,8 +653,8 @@ func (s *Shape) Rebuild() {
 				hubEnd := Point3D{X: 0, Y: firstLine[maxPts-1].Y, Z: 0}.Sub(origin)
 				hubUV := Point2D{X: 0.5, Y: 0.5}
 				for k := 0; k < steps; k++ {
-					a0 := float32(k) * dTheta
-					a1 := float32(k+1) * dTheta
+					a0 := rotTurnsAt[k] * 2.0 * math.Pi
+					a1 := rotTurnsAt[k+1] * 2.0 * math.Pi
 					u0 := Point2D{X: 0.5 + 0.5*math32.Cos(a0), Y: 0.5 + 0.5*math32.Sin(a0)}
 					u1 := Point2D{X: 0.5 + 0.5*math32.Cos(a1), Y: 0.5 + 0.5*math32.Sin(a1)}
 					addTri(hubEnd, rings[k][maxPts-1], rings[k+1][maxPts-1], hubUV, u0, u1)
@@ -582,18 +786,49 @@ func (s *Shape) Rebuild() {
 
 // --- Helper 2D profile builders ---
 
+// LineScale scales the X and Y coordinates of a 2D line by (x, y) and returns a new line.
+func LineScale(line []Point2D, x, y float32) []Point2D {
+	if len(line) == 0 {
+		return nil
+	}
+	out := make([]Point2D, len(line))
+	for i, pt := range line {
+		out[i] = Point2D{
+			X: pt.X * x,
+			Y: pt.Y * y,
+		}
+	}
+	return out
+}
+
+// LineCircle generates a 2D circular or elliptical arc polyline with `steps` segments
+// from `fromRotation` to `toRotation` (expressed in turns, where 1.0 = one full 360° rotation),
+// centered at `center` with X and Y radii `radius`.
+func LineCircle(steps int, fromRotation, toRotation float32, center, radius Point2D) []Point2D {
+	if steps < 1 {
+		steps = 1
+	}
+	pts := make([]Point2D, steps+1)
+	for i := 0; i <= steps; i++ {
+		t := float32(i) / float32(steps)
+		rot := fromRotation + (toRotation-fromRotation)*t
+		theta := rot * 2.0 * math.Pi
+		pts[i] = Point2D{
+			X: center.X + radius.X*math32.Cos(theta),
+			Y: center.Y + radius.Y*math32.Sin(theta),
+		}
+	}
+	if math32.Abs(math32.Abs(toRotation-fromRotation)-1.0) < 1e-6 {
+		pts[steps] = pts[0]
+	}
+	return pts
+}
+
 func NewLineHalfCircle(radius float32, segments int) []Point2D {
 	if segments < 2 {
 		segments = 2
 	}
-	pts := make([]Point2D, segments+1)
-	for i := 0; i <= segments; i++ {
-		phi := -math.Pi/2 + (math.Pi*float32(i))/float32(segments)
-		pts[i] = Point2D{
-			X: radius * math32.Cos(phi),
-			Y: radius * math32.Sin(phi),
-		}
-	}
+	pts := LineCircle(segments, -0.25, 0.25, Point2D{}, Point2D{X: radius, Y: radius})
 	pts[0].X = 0
 	pts[segments].X = 0
 	return pts
@@ -603,16 +838,7 @@ func NewLineCircle(radius float32, segments int) []Point2D {
 	if segments < 3 {
 		segments = 3
 	}
-	pts := make([]Point2D, segments+1)
-	for i := 0; i <= segments; i++ {
-		theta := (2.0 * math.Pi * float32(i)) / float32(segments)
-		pts[i] = Point2D{
-			X: radius * math32.Cos(theta),
-			Y: radius * math32.Sin(theta),
-		}
-	}
-	pts[segments] = pts[0]
-	return pts
+	return LineCircle(segments, 0.0, 1.0, Point2D{}, Point2D{X: radius, Y: radius})
 }
 
 func NewLineRect(width, height float32) []Point2D {
@@ -622,6 +848,17 @@ func NewLineRect(width, height float32) []Point2D {
 		{X: width, Y: height},
 		{X: 0, Y: height},
 		{X: 0, Y: 0},
+	}
+}
+
+// NewLineCenteredSquare returns a closed 2D square centered at (0, 0), starting at (-halfSize, -halfSize).
+func NewLineCenteredSquare(halfSize float32) []Point2D {
+	return []Point2D{
+		{X: -halfSize, Y: -halfSize},
+		{X: halfSize, Y: -halfSize},
+		{X: halfSize, Y: halfSize},
+		{X: -halfSize, Y: halfSize},
+		{X: -halfSize, Y: -halfSize},
 	}
 }
 

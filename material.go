@@ -4,6 +4,8 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"os"
+	"path/filepath"
 
 	"github.com/g3n/engine/gls"
 	"github.com/g3n/engine/material"
@@ -39,6 +41,21 @@ func RGB(r, g, b float32) math32.Color {
 // RGBA8 constructs a standard library 8-bit color.RGBA.
 func RGBA8(r, g, b, a uint8) color.RGBA {
 	return color.RGBA{R: r, G: g, B: b, A: a}
+}
+
+// ResolveAssetPath returns the first existing OS-native file path among `candidates`,
+// or the normalized first candidate if none exist yet on disk.
+func ResolveAssetPath(candidates ...string) string {
+	for _, c := range candidates {
+		native := filepath.FromSlash(c)
+		if _, err := os.Stat(native); err == nil {
+			return native
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	return filepath.FromSlash(candidates[0])
 }
 
 // NewSolidMaterial creates a standard shaded solid-color material.
@@ -144,7 +161,7 @@ func NewBitmapMaterialFromRGBA(img *image.RGBA, opts BitmapOptions) *material.St
 // NewBitmapMaterialFromFile loads an image file from disk into a repeating bitmap material.
 // If the file cannot be read, it falls back to a generated checkerboard bitmap so rendering continues cleanly.
 func NewBitmapMaterialFromFile(path string, opts BitmapOptions) *material.Standard {
-	tex, err := texture.NewTexture2DFromImage(path)
+	tex, err := texture.NewTexture2DFromImage(filepath.FromSlash(path))
 	if err != nil {
 		fallback := GenerateCheckerBitmap(128, 128, 8, RGBA8(180, 180, 180, 255), RGBA8(90, 90, 90, 255))
 		return NewBitmapMaterialFromRGBA(fallback, opts)
@@ -174,6 +191,41 @@ func NewBitmapMaterialFromFile(path string, opts BitmapOptions) *material.Standa
 	tex.SetRepeat(rx, ry)
 	mat.AddTexture(tex)
 	return mat
+}
+
+// NewBitmapMaterialFromFiles resolves the first existing file among `candidatePaths` and loads it as a repeating bitmap material.
+func NewBitmapMaterialFromFiles(candidatePaths []string, opts BitmapOptions) *material.Standard {
+	return NewBitmapMaterialFromFile(ResolveAssetPath(candidatePaths...), opts)
+}
+
+// --- Core Default & Robot Materials ---
+
+func MatDefaultShape() *material.Standard {
+	return NewSolidMaterial(RGB(0.70, 0.70, 0.75), 40)
+}
+
+func MatFloorGrid() *material.Standard {
+	return NewEmissiveMaterial(RGB(0.0, 0.85, 0.20))
+}
+
+func MatRobotChassis() *material.Standard {
+	return NewMetallicMaterial(RGB(0.15, 0.15, 0.18), RGB(0.45, 0.45, 0.52), 70)
+}
+
+func MatRobotArm() *material.Standard {
+	return NewMetallicMaterial(RGB(0.20, 0.60, 0.80), RGB(0.60, 0.85, 0.95), 80)
+}
+
+func MatRobotSensor() *material.Standard {
+	return NewSolidMaterial(RGB(0.90, 0.50, 0.10), 65)
+}
+
+func MatRobotWheel() *material.Standard {
+	return NewSolidMaterial(RGB(0.10, 0.10, 0.10), 15)
+}
+
+func MatRobotSpoke() *material.Standard {
+	return NewMetallicMaterial(RGB(0.85, 0.85, 0.88), RGB(1.0, 1.0, 1.0), 100)
 }
 
 // --- General Procedural Bitmap Generators ---
@@ -226,7 +278,6 @@ func GenerateBrickBitmap(width, height, rows, cols int, brickBase, brickAlt, mor
 		rIdx := int(float64(y) / rowH)
 		localY := float64(y) - float64(rIdx)*rowH
 
-		// Half-brick horizontal stagger on alternating courses
 		shiftX := 0.0
 		if rIdx%2 == 1 {
 			shiftX = colW * 0.5
@@ -237,7 +288,6 @@ func GenerateBrickBitmap(width, height, rows, cols int, brickBase, brickAlt, mor
 			cIdx := int(sx / colW)
 			localX := sx - float64(cIdx)*colW
 
-			// Mortar joint along bottom and right edge of each brick cell
 			if localY < mortarPx || localX < mortarPx {
 				n := int(hash2D(x, y)%19) - 9
 				img.SetRGBA(x, y, color.RGBA{
@@ -249,7 +299,6 @@ func GenerateBrickBitmap(width, height, rows, cols int, brickBase, brickAlt, mor
 				continue
 			}
 
-			// Per-brick shade variation + fine clay grain
 			brickHash := hash2D(cIdx, rIdx)
 			tone := float64(brickHash%100) / 100.0
 			col := lerpColor8(brickBase, brickAlt, tone)
@@ -281,26 +330,23 @@ func GenerateRoofTileBitmap(width, height, rows, cols int, tileBase, tileShadow,
 
 	for y := 0; y < height; y++ {
 		rIdx := int(float64(y) / rowH)
-		v := (float64(y) - float64(rIdx)*rowH) / rowH // 0..1 from top to bottom of tile course
+		v := (float64(y) - float64(rIdx)*rowH) / rowH
 
 		for x := 0; x < width; x++ {
 			cIdx := int(float64(x) / colW)
-			u := (float64(x) - float64(cIdx)*colW) / colW // 0..1 across curved tile width
+			u := (float64(x) - float64(cIdx)*colW) / colW
 
-			// Barrel profile across u: bright crest in the middle, dark trough at edges
 			arch := math.Sin(u * math.Pi)
 			col := lerpColor8(tileShadow, tileBase, 0.35+0.65*arch)
 			if arch > 0.72 {
 				col = lerpColor8(col, tileHighlight, (arch-0.72)/0.28*0.45)
 			}
 
-			// Overlapping course lip shadow near v -> 1.0
 			if v > 0.84 {
 				lip := (v - 0.84) / 0.16
 				col = lerpColor8(col, tileShadow, lip*0.75)
 			}
 
-			// Subtle per-tile weathering
 			tileTint := int(hash2D(cIdx, rIdx)%17) - 8
 			grain := int(hash2D(x, y)%11) - 5
 			delta := tileTint + grain

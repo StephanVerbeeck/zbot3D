@@ -5,7 +5,6 @@ import (
 
 	"github.com/g3n/engine/core"
 	"github.com/g3n/engine/material"
-	"github.com/g3n/engine/math32"
 )
 
 // World manages the 3D Shape objects placed in the robot's environment.
@@ -28,6 +27,19 @@ func (w *World) AddShape(s *Shape, pos Point3D) *Shape {
 	return s
 }
 
+// AddUprightShape rotates a Z-swept shape by -90° around X so it stands vertically along +Y,
+// and positions it at `centerBottom` offset by `(offsetX, 0, offsetZ)`.
+func (w *World) AddUprightShape(s *Shape, centerBottom Point3D, offsetX, offsetZ float32) *Shape {
+	SetNodeRotation(s, NewQuatFromAxisAngle(Point3D{X: 1}, -math.Pi/2))
+	return w.AddShape(s, centerBottom.Add(Point3D{X: offsetX, Z: offsetZ}))
+}
+
+// AddWallBox creates and places an axis-aligned rectangular wall or block starting at (x0, y0, z0).
+func (w *World) AddWallBox(x0, y0, z0, lengthX, heightY, depthZ float32, mat material.IMaterial) *Shape {
+	wall := NewShape(mat, 1, nil, []float32{depthZ}, NewLineRect(lengthX, heightY))
+	return w.AddShape(wall, Point3D{X: x0, Y: y0, Z: z0})
+}
+
 func (w *World) ToggleWireframe() {
 	w.wireframe = !w.wireframe
 	for _, s := range w.shapes {
@@ -35,76 +47,18 @@ func (w *World) ToggleWireframe() {
 	}
 }
 
-// centeredSquareLoop returns a closed 2D square centered at (0, 0), starting at (-halfSize, -halfSize).
-func centeredSquareLoop(halfSize float32) []Point2D {
-	return []Point2D{
-		{X: -halfSize, Y: -halfSize},
-		{X: halfSize, Y: -halfSize},
-		{X: halfSize, Y: halfSize},
-		{X: -halfSize, Y: halfSize},
-		{X: -halfSize, Y: -halfSize},
-	}
-}
-
-// alignedCircleLoop returns a closed 2D circle centered at (0, 0) starting at -3π/4
-// so its quadrants align symmetrically with centeredSquareLoop.
-func alignedCircleLoop(radius float32, segments int) []Point2D {
-	if segments < 4 {
-		segments = 4
-	}
-	pts := make([]Point2D, segments+1)
-	startAngle := float32(-3.0 * math.Pi / 4.0)
-	for i := 0; i <= segments; i++ {
-		theta := startAngle + (2.0*math.Pi*float32(i))/float32(segments)
-		pts[i] = Point2D{
-			X: radius * math32.Cos(theta),
-			Y: radius * math32.Sin(theta),
-		}
-	}
-	pts[segments] = pts[0]
-	return pts
-}
-
-// addUprightShiftedPillar builds a shifted (Rotate=false) pillar with variable step distances,
-// stands it upright along +Y, and places its bottom center on the floor at (centerX, floorY, centerZ).
-func (w *World) addUprightShiftedPillar(
-	centerX, centerZ float32,
-	baseHalfSize float32,
-	mat material.IMaterial,
-	shiftDists []float32,
-	profiles ...[]Point2D,
-) *Shape {
-	steps := len(profiles) - 1
-	pillar := NewShape(steps, false, shiftDists, mat, profiles...)
-	SetNodeRotation(pillar, NewQuatFromAxisAngle(Point3D{X: 1}, -math.Pi/2))
-	// Offset by (-baseHalfSize, +baseHalfSize) so the centered bottom face sits at (centerX, floorY, centerZ)
-	return w.AddShape(pillar, Point3D{
-		X: centerX - baseHalfSize,
-		Y: floorY,
-		Z: centerZ + baseHalfSize,
-	})
-}
-
 func (w *World) Build() {
-	// --- 1. Kerstboom (bruine stam onderaan + groene gelaagde kruin bovenaan) ---
-	matTrunk := material.NewStandard(&math32.Color{R: 0.36, G: 0.20, B: 0.09})
-	matPine := material.NewStandard(&math32.Color{R: 0.06, G: 0.42, B: 0.14})
-	matStar := material.NewStandard(&math32.Color{R: 1.0, G: 0.82, B: 0.12})
-	matStar.SetShininess(90)
-
+	// --- 1. Kerstboom ---
 	treePos := Point3D{X: 3.8, Y: floorY, Z: 3.8}
 
-	// Bruine stam (cilindervorm via rotatie rond Y)
 	trunkLine := []Point2D{
 		{X: 0.0, Y: 0.0},
 		{X: 0.22, Y: 0.0},
 		{X: 0.19, Y: 0.75},
 		{X: 0.0, Y: 0.75},
 	}
-	trunk := NewShape(20, true, nil, matTrunk, trunkLine)
-	w.AddShape(trunk, treePos)
+	w.AddShape(NewShape(MatTreeBark(2, 2), 20, nil, nil, trunkLine), treePos)
 
-	// Groene dennenboom-top (3 getrapte kegellagen via rotatie rond Y)
 	treeTopLine := []Point2D{
 		{X: 0.0, Y: 0.0},
 		{X: 1.15, Y: 0.0},
@@ -114,49 +68,45 @@ func (w *World) Build() {
 		{X: 0.65, Y: 1.65},
 		{X: 0.0, Y: 2.55},
 	}
-	treeTop := NewShape(24, true, nil, matPine, treeTopLine)
-	w.AddShape(treeTop, treePos.Add(Point3D{Y: 0.65}))
+	w.AddShape(NewShape(MatPineFoliage(), 24, nil, nil, treeTopLine), treePos.Add(Point3D{Y: 0.65}))
 
-	// Gouden piek/bol op de top van de kerstboom
-	treeStar := NewShape(16, true, nil, matStar, NewLineHalfCircle(0.16, 12))
-	w.AddShape(treeStar, treePos.Add(Point3D{Y: 0.65 + 2.50}))
+	w.AddShape(NewShape(MatGoldMetal(), 16, nil, nil, NewLineHalfCircle(0.16, 12)), treePos.Add(Point3D{Y: 0.65 + 2.50}))
 
-	// --- 2. Kubussen & Balken (pure verschuiving, Rotate = false) ---
-	matSteelBlue := material.NewStandard(&math32.Color{R: 0.18, G: 0.42, B: 0.68})
-	matSteelBlue.SetShininess(60)
-	cube := NewShape(1, false, []float32{1.0}, matSteelBlue, NewLineRect(1.0, 1.0))
-	w.AddShape(cube, Point3D{X: -3.5, Y: floorY, Z: 3.2})
+	// --- 2. Bakstenen Huisje met Pannendak ---
+	houseOrigin := Point3D{X: -6.8, Y: floorY, Z: 4.5}
+	wallWidth := float32(2.4)
+	wallHeight := float32(1.5)
+	wallDepth := float32(2.0)
 
-	matTerracotta := material.NewStandard(&math32.Color{R: 0.76, G: 0.30, B: 0.20})
-	block := NewShape(2, false, []float32{0.35, 0.55}, matTerracotta, NewLineRect(0.8, 1.8))
-	w.AddShape(block, Point3D{X: 4.5, Y: floorY, Z: -2.8})
+	w.AddWallBox(houseOrigin.X, floorY, houseOrigin.Z, wallWidth, wallHeight, wallDepth, MatBrickWall(3, 2))
 
-	// --- 3. Bollen (halve cirkel met pure rotatie, ShiftDist = nil) ---
-	matGold := material.NewStandard(&math32.Color{R: 0.88, G: 0.68, B: 0.15})
-	matGold.SetShininess(100)
-	goldSphere := NewShape(28, true, nil, matGold, NewLineHalfCircle(0.65, 20))
-	w.AddShape(goldSphere, Point3D{X: -2.8, Y: floorY, Z: -3.5})
+	roofOverhang := float32(0.25)
+	roofPitch := float32(0.95)
+	roofTriangle := []Point2D{
+		{X: -roofOverhang, Y: 0.0},
+		{X: wallWidth + roofOverhang, Y: 0.0},
+		{X: wallWidth * 0.5, Y: roofPitch},
+		{X: -roofOverhang, Y: 0.0},
+	}
+	tileRoof := NewShape(MatTileRoof(3, 2), 1, nil, []float32{wallDepth + 2*roofOverhang}, roofTriangle)
+	w.AddShape(tileRoof, houseOrigin.Add(Point3D{X: -roofOverhang, Y: wallHeight, Z: -roofOverhang}))
 
-	matCrimson := material.NewStandard(&math32.Color{R: 0.78, G: 0.12, B: 0.24})
-	matCrimson.SetShininess(75)
-	crimsonSphere := NewShape(24, true, nil, matCrimson, NewLineHalfCircle(0.45, 18))
-	w.AddShape(crimsonSphere, Point3D{X: -4.8, Y: floorY, Z: 0.5})
+	// --- 3. Kubussen & Balken ---
+	w.AddShape(NewShape(MatSteelBlueMetal(), 1, nil, []float32{1.0}, NewLineRect(1.0, 1.0)), Point3D{X: -3.5, Y: floorY, Z: 3.2})
+	w.AddShape(NewShape(MatBrushedSteel(2, 2), 2, nil, []float32{0.35, 0.55}, NewLineRect(0.8, 1.8)), Point3D{X: 4.5, Y: floorY, Z: -2.8})
 
-	// --- 4. Torussen (cirkel met gecombineerde rotatie + verschuiving) ---
-	matViolet := material.NewStandard(&math32.Color{R: 0.48, G: 0.22, B: 0.72})
-	matViolet.SetShininess(80)
-	flatTorus := NewShape(32, true, []float32{0.18}, matViolet, NewLineCircle(0.24, 18))
-	w.AddShape(flatTorus, Point3D{X: 2.2, Y: floorY + 0.24, Z: -4.2})
+	// --- 4. Bollen ---
+	w.AddShape(NewShape(MatGoldMetal(), 28, nil, nil, NewLineHalfCircle(0.65, 20)), Point3D{X: -2.8, Y: floorY, Z: -3.5})
+	w.AddShape(NewShape(MatCrimsonGloss(), 24, nil, nil, NewLineHalfCircle(0.45, 18)), Point3D{X: -4.8, Y: floorY, Z: 0.5})
 
-	matCyan := material.NewStandard(&math32.Color{R: 0.12, G: 0.72, B: 0.72})
-	matCyan.SetShininess(85)
-	archTorus := NewShape(28, true, []float32{0.20}, matCyan, NewLineCircle(0.20, 16))
+	// --- 5. Torussen ---
+	w.AddShape(NewShape(MatVioletGloss(), 32, []float32{1.0 / 32.0}, []float32{0.18}, NewLineCircle(0.24, 18)), Point3D{X: 2.2, Y: floorY + 0.24, Z: -4.2})
+
+	archTorus := NewShape(MatCyanGloss(), 28, []float32{1.0 / 28.0}, []float32{0.20}, NewLineCircle(0.20, 16))
 	SetNodeRotation(archTorus, NewQuatFromAxisAngle(Point3D{X: 1}, math.Pi/2))
 	w.AddShape(archTorus, Point3D{X: 0.0, Y: floorY + 1.09, Z: 6.0})
 
-	// --- 5. Gecanneleerde zuil met herhalende lijnen (line[0], line[1], line[0], ...) ---
-	matMarble := material.NewStandard(&math32.Color{R: 0.82, G: 0.80, B: 0.76})
-	matMarble.SetShininess(50)
+	// --- 6. Gecanneleerde marmeren zuil ---
 	fluteOuter := []Point2D{
 		{X: 0.0, Y: 0.0},
 		{X: 0.46, Y: 0.0},
@@ -173,54 +123,81 @@ func (w *World) Build() {
 		{X: 0.28, Y: 1.35},
 		{X: 0.0, Y: 1.35},
 	}
-	flutedColumn := NewShape(32, true, nil, matMarble, fluteOuter, fluteInner)
-	w.AddShape(flutedColumn, Point3D{X: 0.0, Y: floorY, Z: -5.5})
+	w.AddShape(NewShape(MatMarble(3, 2), 32, nil, nil, fluteOuter, fluteInner), Point3D{X: 0.0, Y: floorY, Z: -5.5})
 
-	// --- 6. Pilaren met variabele shiftDist []float32 (vierkant onder/boven, rond in het midden) ---
-	// Dankzij []float32 hoeft de lange ronde schacht maar 1 stap te zijn (geen N herhaalde ringlijnen),
-	// en hoeven de hoogtes van voet, schuine overgang, schacht en kapiteel geen veelvouden te zijn.
-
-	// A. Klassieke zandstenen pilaren: 5 stappen met ongelijke afstanden [0.26, 0.14, 2.15, 0.14, 0.26]
-	matSandstone := material.NewStandard(&math32.Color{R: 0.84, G: 0.74, B: 0.56})
-	matSandstone.SetShininess(45)
-
-	sqCap := centeredSquareLoop(0.46)
-	roundShaft := alignedCircleLoop(0.28, 24)
-	classicShifts := []float32{0.26, 0.14, 2.15, 0.14, 0.26}
+	// --- 7. Pilaren (vierkant onder/boven, rond in het midden) ---
+	sqCap := NewLineCenteredSquare(0.46)
+	roundShaft := LineCircle(24, -0.375, 0.625, Point2D{}, Point2D{X: 0.28, Y: 0.28})
+	classicMoves := []float32{0.26, 0.14, 2.15, 0.14, 0.26}
 	classicProfiles := [][]Point2D{sqCap, sqCap, roundShaft, roundShaft, sqCap, sqCap}
 
-	w.addUprightShiftedPillar(-2.2, 5.5, 0.46, matSandstone, classicShifts, classicProfiles...)
-	w.addUprightShiftedPillar(2.2, 5.5, 0.46, matSandstone, classicShifts, classicProfiles...)
+	w.AddUprightShape(NewShape(MatSandstone(2, 3), 5, nil, classicMoves, classicProfiles...), Point3D{X: -2.2, Y: floorY, Z: 5.5}, -0.46, 0.46)
+	w.AddUprightShape(NewShape(MatSandstone(2, 3), 5, nil, classicMoves, classicProfiles...), Point3D{X: 2.2, Y: floorY, Z: 5.5}, -0.46, 0.46)
 
-	// B. Getrapte granieten zuil met brede plint en brede kroon: 7 stappen [0.22, 0.13, 0.09, 2.45, 0.09, 0.13, 0.22]
-	matGranite := material.NewStandard(&math32.Color{R: 0.42, G: 0.45, B: 0.48})
-	matGranite.SetShininess(70)
-
-	widePlinth := centeredSquareLoop(0.58)
-	midNeck := centeredSquareLoop(0.42)
-	slimShaft := alignedCircleLoop(0.26, 24)
-	tieredShifts := []float32{0.22, 0.13, 0.09, 2.45, 0.09, 0.13, 0.22}
+	widePlinth := NewLineCenteredSquare(0.58)
+	midNeck := NewLineCenteredSquare(0.42)
+	slimShaft := LineCircle(24, -0.375, 0.625, Point2D{}, Point2D{X: 0.26, Y: 0.26})
+	tieredMoves := []float32{0.22, 0.13, 0.09, 2.45, 0.09, 0.13, 0.22}
 	tieredProfiles := [][]Point2D{
 		widePlinth, widePlinth, midNeck,
-		slimShaft, slimShaft, // Eén enkele stap van 2.45 voor de hele ronde middenschacht
+		slimShaft, slimShaft,
 		midNeck, widePlinth, widePlinth,
 	}
+	w.AddUprightShape(NewShape(MatGranite(2, 3), 7, nil, tieredMoves, tieredProfiles...), Point3D{X: 5.8, Y: floorY, Z: 0.8}, -0.58, 0.58)
 
-	w.addUprightShiftedPillar(5.8, 0.8, 0.58, matGranite, tieredShifts, tieredProfiles...)
-
-	// C. Bronzen modulus-pilaar: 3 afstanden [0.17, 0.61, 0.13] herhaald via modulus over 9 stappen
-	matBronze := material.NewStandard(&math32.Color{R: 0.62, G: 0.44, B: 0.24})
-	matBronze.SetShininess(85)
-
-	sqEnd := centeredSquareLoop(0.48)
-	roundWide := alignedCircleLoop(0.34, 24)
-	roundNarrow := alignedCircleLoop(0.24, 24)
-	modulusShifts := []float32{0.17, 0.61, 0.13} // Cycled via step % 3 over 9 stappen
+	sqEnd := NewLineCenteredSquare(0.48)
+	roundWide := LineCircle(24, -0.375, 0.625, Point2D{}, Point2D{X: 0.34, Y: 0.34})
+	roundNarrow := LineCircle(24, -0.375, 0.625, Point2D{}, Point2D{X: 0.24, Y: 0.24})
+	modulusMoves := []float32{0.17, 0.61, 0.13}
 	modulusProfiles := [][]Point2D{
 		sqEnd, sqEnd,
 		roundNarrow, roundWide, roundWide, roundNarrow, roundNarrow, roundWide,
 		sqEnd, sqEnd,
 	}
+	w.AddUprightShape(NewShape(MatBronzeMetal(), 9, nil, modulusMoves, modulusProfiles...), Point3D{X: -5.8, Y: floorY, Z: -2.2}, -0.48, 0.48)
 
-	w.addUprightShiftedPillar(-5.8, -2.2, 0.48, matBronze, modulusShifts, modulusProfiles...)
+	// --- 8. ShapeInfo + Lerp + Scale demonstratie ---
+	infoStart := ShapeInfo{
+		Name:     "StraightColumn",
+		Material: MatSteelBlueMetal(),
+		Steps:    12,
+		Rotate:   []float32{0.0, 0.0},
+		Move:     []float32{0.14},
+		Lines:    [][]Point2D{NewLineCenteredSquare(0.36)},
+	}
+	infoEnd := ShapeInfo{
+		Name:     "TwistedOctagon",
+		Material: MatGoldMetal(),
+		Steps:    12,
+		Rotate:   []float32{0.04, 0.02},
+		Move:     []float32{0.22},
+		Lines:    [][]Point2D{LineCircle(4, -0.375, 0.625, Point2D{}, Point2D{X: 0.30, Y: 0.30})},
+	}
+
+	for idx, ratio := range []float32{0.0, 0.5, 1.0} {
+		var morphed ShapeInfo
+		morphed.Lerp(&infoStart, &infoEnd, ratio)
+		w.AddUprightShape(morphed.New(), Point3D{X: -6.5 + float32(idx)*1.6, Y: floorY, Z: -5.5}, 0, 0)
+	}
+
+	ellipseProfile := LineCircle(24, 0.0, 1.0, Point2D{}, Point2D{X: 0.32, Y: 0.16})
+	baseRing := ShapeInfo{
+		Name:     "EllipticalTorus",
+		Material: MatCyanGloss(),
+		Steps:    32,
+		Rotate:   []float32{1.0 / 32.0},
+		Move:     []float32{0.18},
+		Lines:    [][]Point2D{ellipseProfile},
+	}
+
+	var scaled2D ShapeInfo
+	scaled2D.Scale(&baseRing, 0.7, 1.5, 1.2, 1.0, 1.0, 1.0)
+	w.AddShape(scaled2D.New(), Point3D{X: -6.5, Y: floorY + 0.24, Z: -1.5})
+
+	var scaled3D ShapeInfo
+	scaled3D.Scale(&baseRing, 1.0, 1.0, 1.0, 1.4, 0.6, 1.0)
+	w.AddShape(scaled3D.New(), Point3D{X: -4.2, Y: floorY + 0.12, Z: -5.5})
+
+	// --- 9. Project-specifieke wereldonderdelen (myWorld.go) ---
+	w.BuildMaze()
 }

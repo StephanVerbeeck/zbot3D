@@ -4,39 +4,7 @@ import (
 	"github.com/g3n/engine/material"
 )
 
-// --- Default & Environment Materials ---
-
-func MatDefaultShape() *material.Standard {
-	return NewSolidMaterial(RGB(0.70, 0.70, 0.75), 40)
-}
-
-func MatFloorGrid() *material.Standard {
-	return NewEmissiveMaterial(RGB(0.0, 0.85, 0.20))
-}
-
-// --- Robot Solid & Metallic Materials ---
-
-func MatRobotChassis() *material.Standard {
-	return NewMetallicMaterial(RGB(0.15, 0.15, 0.18), RGB(0.45, 0.45, 0.52), 70)
-}
-
-func MatRobotArm() *material.Standard {
-	return NewMetallicMaterial(RGB(0.20, 0.60, 0.80), RGB(0.60, 0.85, 0.95), 80)
-}
-
-func MatRobotSensor() *material.Standard {
-	return NewSolidMaterial(RGB(0.90, 0.50, 0.10), 65)
-}
-
-func MatRobotWheel() *material.Standard {
-	return NewSolidMaterial(RGB(0.10, 0.10, 0.10), 15)
-}
-
-func MatRobotSpoke() *material.Standard {
-	return NewMetallicMaterial(RGB(0.85, 0.85, 0.88), RGB(1.0, 1.0, 1.0), 100)
-}
-
-// --- World Solid & Metallic Materials ---
+// --- Project-Specific Solid & Metallic Materials ---
 
 func MatGoldMetal() *material.Standard {
 	return NewMetallicMaterial(RGB(0.88, 0.68, 0.15), RGB(1.0, 0.92, 0.55), 110)
@@ -70,9 +38,56 @@ func MatPineFoliage() *material.Standard {
 	return NewSolidMaterial(RGB(0.06, 0.42, 0.14), 20)
 }
 
-// --- World Bitmap Materials ---
+// --- Brick Image File Materials (material\brick 01..04) ---
 
-// MatBrickWall creates a classic red-brown running-bond brick wall bitmap material.
+func MatBrick01(repeatX, repeatY float32) *material.Standard {
+	return NewBitmapMaterialFromFile("material/brick 01.jpg", BitmapOptions{
+		RepeatX:   repeatX,
+		RepeatY:   repeatY,
+		Shininess: 20,
+	})
+}
+
+func MatBrick02(repeatX, repeatY float32) *material.Standard {
+	return NewBitmapMaterialFromFiles([]string{"material/brick 02.jpg", "material/brick 02jpg"}, BitmapOptions{
+		RepeatX:   repeatX,
+		RepeatY:   repeatY,
+		Shininess: 20,
+	})
+}
+
+func MatBrick03(repeatX, repeatY float32) *material.Standard {
+	return NewBitmapMaterialFromFile("material/brick 03.jpg", BitmapOptions{
+		RepeatX:   repeatX,
+		RepeatY:   repeatY,
+		Shininess: 20,
+	})
+}
+
+func MatBrick04(repeatX, repeatY float32) *material.Standard {
+	return NewBitmapMaterialFromFile("material/brick 04.jpg", BitmapOptions{
+		RepeatX:   repeatX,
+		RepeatY:   repeatY,
+		Shininess: 20,
+	})
+}
+
+// MatBrickByIndex returns one of the four brick bitmap materials (0..3) with the given UV repeat.
+func MatBrickByIndex(index int, repeatX, repeatY float32) *material.Standard {
+	switch ((index % 4) + 4) % 4 {
+	case 0:
+		return MatBrick01(repeatX, repeatY)
+	case 1:
+		return MatBrick02(repeatX, repeatY)
+	case 2:
+		return MatBrick03(repeatX, repeatY)
+	default:
+		return MatBrick04(repeatX, repeatY)
+	}
+}
+
+// --- Project-Specific Procedural Bitmap Materials ---
+
 func MatBrickWall(repeatX, repeatY float32) *material.Standard {
 	bmp := GenerateBrickBitmap(
 		256, 256, 8, 4,
@@ -87,7 +102,6 @@ func MatBrickWall(repeatX, repeatY float32) *material.Standard {
 	})
 }
 
-// MatTileRoof creates a terracotta overlapping barrel-tile roof bitmap material.
 func MatTileRoof(repeatX, repeatY float32) *material.Standard {
 	bmp := GenerateRoofTileBitmap(
 		256, 256, 6, 8,
@@ -102,7 +116,6 @@ func MatTileRoof(repeatX, repeatY float32) *material.Standard {
 	})
 }
 
-// MatSlateRoof creates a dark blue-grey overlapping slate roof tile bitmap material.
 func MatSlateRoof(repeatX, repeatY float32) *material.Standard {
 	bmp := GenerateRoofTileBitmap(
 		256, 256, 8, 6,
@@ -117,7 +130,6 @@ func MatSlateRoof(repeatX, repeatY float32) *material.Standard {
 	})
 }
 
-// MatTreeBark creates a brown textured wood bark bitmap material for tree trunks.
 func MatTreeBark(repeatX, repeatY float32) *material.Standard {
 	bmp := GenerateWoodBitmap(
 		128, 128,
@@ -131,7 +143,6 @@ func MatTreeBark(repeatX, repeatY float32) *material.Standard {
 	})
 }
 
-// MatSandstone creates a warm speckled sandstone bitmap material for pillars.
 func MatSandstone(repeatX, repeatY float32) *material.Standard {
 	bmp := GenerateStoneBitmap(
 		256, 256,
@@ -145,7 +156,6 @@ func MatSandstone(repeatX, repeatY float32) *material.Standard {
 	})
 }
 
-// MatGranite creates a speckled grey granite bitmap material for pillars.
 func MatGranite(repeatX, repeatY float32) *material.Standard {
 	bmp := GenerateStoneBitmap(
 		256, 256,
@@ -159,7 +169,6 @@ func MatGranite(repeatX, repeatY float32) *material.Standard {
 	})
 }
 
-// MatMarble creates a veined off-white marble bitmap material.
 func MatMarble(repeatX, repeatY float32) *material.Standard {
 	bmp := GenerateStoneBitmap(
 		256, 256,
@@ -173,7 +182,6 @@ func MatMarble(repeatX, repeatY float32) *material.Standard {
 	})
 }
 
-// MatBrushedSteel creates a brushed steel metallic bitmap material.
 func MatBrushedSteel(repeatX, repeatY float32) *material.Standard {
 	bmp := GenerateBrushedMetalBitmap(
 		256, 256,
