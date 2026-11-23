@@ -104,7 +104,8 @@ type Shape struct {
 }
 
 type triangle3D struct {
-	a, b, c Point3D
+	a, b, c    Point3D
+	ua, ub, uc Point2D
 }
 
 // NewShape creates a new 3D Shape positioned at (0, 0, 0) with Wireframe=false by default.
@@ -112,7 +113,6 @@ type triangle3D struct {
 // One or more 2D lines can be passed at the end; shorter lines are extended to match the
 // longest line by repeating each point, and during stepping step k uses lines[k % len(lines)].
 func NewShape(steps int, rotate bool, shiftDist []float32, mat material.IMaterial, lines ...[]Point2D) *Shape {
-	// Determine which line has the most points
 	maxPts := 0
 	for _, ln := range lines {
 		if len(ln) > maxPts {
@@ -120,7 +120,6 @@ func NewShape(steps int, rotate bool, shiftDist []float32, mat material.IMateria
 		}
 	}
 
-	// Extend each shorter line to maxPts by repeating its points
 	extendedLines := make([][]Point2D, len(lines))
 	for idx, ln := range lines {
 		extendedLines[idx] = extendLineByRepeating(ln, maxPts)
@@ -148,7 +147,6 @@ func NewShape(steps int, rotate bool, shiftDist []float32, mat material.IMateria
 }
 
 // extendLineByRepeating extends `line` to `targetLen` by repeating each point proportionally.
-// For example, [p1, p2, p3, p4] with targetLen=8 becomes [p1, p1, p2, p2, p3, p3, p4, p4].
 func extendLineByRepeating(line []Point2D, targetLen int) []Point2D {
 	n := len(line)
 	if n == 0 || targetLen <= 0 {
@@ -181,7 +179,7 @@ func (s *Shape) SetWireframe(wireframe bool) {
 	}
 }
 
-// Rebuild generates the 3D vertices, closed solid mesh, and wireframe lines from the Shape parameters.
+// Rebuild generates the 3D vertices, UV coordinates, closed solid mesh, and wireframe lines.
 func (s *Shape) Rebuild() {
 	if s.solidMesh != nil {
 		s.Remove(s.solidMesh)
@@ -196,7 +194,6 @@ func (s *Shape) Rebuild() {
 		return
 	}
 
-	// Filter valid profiles (each needs at least 2 points) and ensure equal point counts
 	var validLines [][]Point2D
 	maxPts := 0
 	for _, ln := range s.Lines {
@@ -237,11 +234,28 @@ func (s *Shape) Rebuild() {
 	lengthAxis := Point3D{X: 0, Y: 1, Z: 0}
 	baseShiftDir := Point3D{X: 0, Y: 0, Z: 1}
 
-	// Build (steps + 1) rings of 3D points starting at step 0
 	rings := make([][]Point3D, steps+1)
+	ringUVs := make([][]Point2D, steps+1)
 	framePos := Point3D{}
 	lineCount := len(normLines)
 	shiftCount := len(s.ShiftDist)
+
+	// Cumulative sweep progress for V texture coordinate
+	sweepPos := make([]float32, steps+1)
+	for k := 1; k <= steps; k++ {
+		stepLen := float32(1.0) / float32(steps)
+		if shiftCount > 0 {
+			d := math32.Abs(s.ShiftDist[(k-1)%shiftCount])
+			if d > 1e-5 {
+				stepLen = d
+			}
+		}
+		sweepPos[k] = sweepPos[k-1] + stepLen
+	}
+	totalSweep := sweepPos[steps]
+	if totalSweep < 1e-6 {
+		totalSweep = 1.0
+	}
 
 	for k := 0; k <= steps; k++ {
 		theta := float32(k) * dTheta
@@ -256,20 +270,35 @@ func (s *Shape) Rebuild() {
 		}
 
 		lineIdx := k % lineCount
-		// Close full 360-degree rotation cleanly back onto line[0] at step N
 		if k == steps && s.Rotate && steps%lineCount != 0 {
 			lineIdx = 0
 		}
 		activeLine := normLines[lineIdx]
 
+		// Normalized arc-length U coordinate along the active 2D profile
+		cumU := make([]float32, maxPts)
+		for i := 1; i < maxPts; i++ {
+			cumU[i] = cumU[i-1] + dist2D(activeLine[i-1], activeLine[i])
+		}
+		totalU := cumU[maxPts-1]
+		if totalU < 1e-6 {
+			totalU = 1.0
+		}
+		vCoord := sweepPos[k] / totalSweep
+
 		ring := make([]Point3D, maxPts)
+		uvs := make([]Point2D, maxPts)
 		for i, pt := range activeLine {
-			// Convert 2D point to 3D at step zero, then rotate and shift
 			p0 := Point3D{X: pt.X, Y: pt.Y, Z: 0}
 			pRot := qStep.Rotate(p0)
 			ring[i] = framePos.Add(pRot)
+			uvs[i] = Point2D{
+				X: cumU[i] / totalU,
+				Y: vCoord,
+			}
 		}
 		rings[k] = ring
+		ringUVs[k] = uvs
 	}
 
 	// Offset all points so the first coordinate of the 2D line at step 0 sits at (0, 0, 0)
@@ -280,7 +309,7 @@ func (s *Shape) Rebuild() {
 		}
 	}
 
-	// 1. Build wireframe lines (profile loops + longitudinal sweep lines)
+	// 1. Build wireframe lines (uses NewWireframeMaterialFrom in material.go)
 	linePositions := math32.NewArrayF32(0, 0)
 	for k := 0; k <= steps; k++ {
 		for i := 0; i < maxPts-1; i++ {
@@ -300,27 +329,18 @@ func (s *Shape) Rebuild() {
 	lineGeom := geometry.NewGeometry()
 	lineGeom.AddVBO(gls.NewVBO(linePositions).AddAttrib(gls.VertexPosition))
 
-	lineColor := &math32.Color{R: 0.2, G: 0.85, B: 1.0}
-	if stdMat, ok := s.Material.(*material.Standard); ok {
-		c := stdMat.AmbientColor()
-		if c.R > 0 || c.G > 0 || c.B > 0 {
-			lineColor = &c
-		}
-	}
-	lineMat := material.NewStandard(lineColor)
-	lineMat.SetEmissiveColor(lineColor)
-
+	lineMat := NewWireframeMaterialFrom(s.Material)
 	s.wireLines = graphic.NewLines(lineGeom, lineMat)
 	s.wireLines.SetVisible(s.Wireframe)
 	s.Add(s.wireLines)
 
-	// 2. Build closed solid triangle surface
+	// 2. Build closed solid triangle surface with UVs
 	var tris []triangle3D
-	addTri := func(a, b, c Point3D) {
+	addTri := func(a, b, c Point3D, ua, ub, uc Point2D) {
 		e1 := b.Sub(a)
 		e2 := c.Sub(a)
 		if e1.Cross(e2).LengthSq() > 1e-12 {
-			tris = append(tris, triangle3D{a: a, b: b, c: c})
+			tris = append(tris, triangle3D{a: a, b: b, c: c, ua: ua, ub: ub, uc: uc})
 		}
 	}
 
@@ -331,9 +351,51 @@ func (s *Shape) Rebuild() {
 			p10 := rings[k+1][i]
 			p11 := rings[k+1][i+1]
 			p01 := rings[k][i+1]
-			addTri(p00, p01, p11)
-			addTri(p00, p11, p10)
+
+			u00 := ringUVs[k][i]
+			u10 := ringUVs[k+1][i]
+			u11 := ringUVs[k+1][i+1]
+			u01 := ringUVs[k][i+1]
+
+			addTri(p00, p01, p11, u00, u01, u11)
+			addTri(p00, p11, p10, u00, u11, u10)
 		}
+	}
+
+	// Helper to compute planar 2D UVs for end-cap polygons
+	capUVsForLine := func(ln []Point2D) []Point2D {
+		minX, maxX := ln[0].X, ln[0].X
+		minY, maxY := ln[0].Y, ln[0].Y
+		for _, p := range ln {
+			if p.X < minX {
+				minX = p.X
+			}
+			if p.X > maxX {
+				maxX = p.X
+			}
+			if p.Y < minY {
+				minY = p.Y
+			}
+			if p.Y > maxY {
+				maxY = p.Y
+			}
+		}
+		spanX := maxX - minX
+		if spanX < 1e-5 {
+			spanX = 1.0
+		}
+		spanY := maxY - minY
+		if spanY < 1e-5 {
+			spanY = 1.0
+		}
+		out := make([]Point2D, len(ln))
+		for i, p := range ln {
+			out[i] = Point2D{
+				X: (p.X - minX) / spanX,
+				Y: (p.Y - minY) / spanY,
+			}
+		}
+		return out
 	}
 
 	// Close open ends to form a closed 3D volume
@@ -343,20 +405,20 @@ func (s *Shape) Rebuild() {
 		profileClosed := dist2D(firstLine[0], firstLine[maxPts-1]) < 1e-5
 
 		if !s.Rotate {
-			// Pure lateral shift (e.g. rectangular prism, extruded pillar): cap front (k=0) and back (k=steps) faces
+			startUVs := capUVsForLine(firstLine)
 			startIndices := triangulatePolygon2D(firstLine)
 			for idx := 0; idx+2 < len(startIndices); idx += 3 {
 				i0, i1, i2 := startIndices[idx], startIndices[idx+1], startIndices[idx+2]
-				addTri(rings[0][i0], rings[0][i2], rings[0][i1])
+				addTri(rings[0][i0], rings[0][i2], rings[0][i1], startUVs[i0], startUVs[i2], startUVs[i1])
 			}
 
+			endUVs := capUVsForLine(endLine)
 			endIndices := triangulatePolygon2D(endLine)
 			for idx := 0; idx+2 < len(endIndices); idx += 3 {
 				i0, i1, i2 := endIndices[idx], endIndices[idx+1], endIndices[idx+2]
-				addTri(rings[steps][i0], rings[steps][i1], rings[steps][i2])
+				addTri(rings[steps][i0], rings[steps][i1], rings[steps][i2], endUVs[i0], endUVs[i1], endUVs[i2])
 			}
 		} else if !hasShift {
-			// Pure rotation around Y-axis: cap open top/bottom edges to the rotation axis
 			hasOpenStart := false
 			for _, ln := range normLines {
 				if math32.Abs(ln[0].X) > 1e-5 {
@@ -366,8 +428,13 @@ func (s *Shape) Rebuild() {
 			}
 			if hasOpenStart {
 				hubStart := Point3D{X: 0, Y: firstLine[0].Y, Z: 0}.Sub(origin)
+				hubUV := Point2D{X: 0.5, Y: 0.5}
 				for k := 0; k < steps; k++ {
-					addTri(hubStart, rings[k+1][0], rings[k][0])
+					a0 := float32(k) * dTheta
+					a1 := float32(k+1) * dTheta
+					u0 := Point2D{X: 0.5 + 0.5*math32.Cos(a0), Y: 0.5 + 0.5*math32.Sin(a0)}
+					u1 := Point2D{X: 0.5 + 0.5*math32.Cos(a1), Y: 0.5 + 0.5*math32.Sin(a1)}
+					addTri(hubStart, rings[k+1][0], rings[k][0], hubUV, u1, u0)
 				}
 			}
 
@@ -380,31 +447,40 @@ func (s *Shape) Rebuild() {
 			}
 			if hasOpenEnd {
 				hubEnd := Point3D{X: 0, Y: firstLine[maxPts-1].Y, Z: 0}.Sub(origin)
+				hubUV := Point2D{X: 0.5, Y: 0.5}
 				for k := 0; k < steps; k++ {
-					addTri(hubEnd, rings[k][maxPts-1], rings[k+1][maxPts-1])
+					a0 := float32(k) * dTheta
+					a1 := float32(k+1) * dTheta
+					u0 := Point2D{X: 0.5 + 0.5*math32.Cos(a0), Y: 0.5 + 0.5*math32.Sin(a0)}
+					u1 := Point2D{X: 0.5 + 0.5*math32.Cos(a1), Y: 0.5 + 0.5*math32.Sin(a1)}
+					addTri(hubEnd, rings[k][maxPts-1], rings[k+1][maxPts-1], hubUV, u0, u1)
 				}
 			}
 		} else if !profileClosed {
-			// Combined rotation + shift with an open 2D profile: bridge last point to first point
 			for k := 0; k < steps; k++ {
 				p00 := rings[k][maxPts-1]
 				p10 := rings[k+1][maxPts-1]
 				p11 := rings[k+1][0]
 				p01 := rings[k][0]
-				addTri(p00, p01, p11)
-				addTri(p00, p11, p10)
+				u00 := ringUVs[k][maxPts-1]
+				u10 := ringUVs[k+1][maxPts-1]
+				u11 := ringUVs[k+1][0]
+				u01 := ringUVs[k][0]
+				addTri(p00, p01, p11, u00, u01, u11)
+				addTri(p00, p11, p10, u00, u11, u10)
 			}
 		} else if rings[0][0].Sub(rings[steps][0]).Length() > 1e-3 {
-			// Open-ended arc/helical sweep with a closed cross-section: cap both ends
+			startUVs := capUVsForLine(firstLine)
 			startIndices := triangulatePolygon2D(firstLine)
 			for idx := 0; idx+2 < len(startIndices); idx += 3 {
 				i0, i1, i2 := startIndices[idx], startIndices[idx+1], startIndices[idx+2]
-				addTri(rings[0][i0], rings[0][i2], rings[0][i1])
+				addTri(rings[0][i0], rings[0][i2], rings[0][i1], startUVs[i0], startUVs[i2], startUVs[i1])
 			}
+			endUVs := capUVsForLine(endLine)
 			endIndices := triangulatePolygon2D(endLine)
 			for idx := 0; idx+2 < len(endIndices); idx += 3 {
 				i0, i1, i2 := endIndices[idx], endIndices[idx+1], endIndices[idx+2]
-				addTri(rings[steps][i0], rings[steps][i1], rings[steps][i2])
+				addTri(rings[steps][i0], rings[steps][i1], rings[steps][i2], endUVs[i0], endUVs[i1], endUVs[i2])
 			}
 		}
 	}
@@ -421,6 +497,7 @@ func (s *Shape) Rebuild() {
 	if signedVol6 < 0 {
 		for i := range tris {
 			tris[i].b, tris[i].c = tris[i].c, tris[i].b
+			tris[i].ub, tris[i].uc = tris[i].uc, tris[i].ub
 		}
 	}
 
@@ -446,7 +523,7 @@ func (s *Shape) Rebuild() {
 		}
 	}
 
-	const smoothCosThreshold float32 = 0.64 // ~50 deg crease angle
+	const smoothCosThreshold float32 = 0.64
 	smoothNormal := func(v Point3D, baseIdx int) Point3D {
 		baseN := faceNormals[baseIdx]
 		sum := Point3D{}
@@ -464,6 +541,7 @@ func (s *Shape) Rebuild() {
 
 	solidPositions := math32.NewArrayF32(0, len(tris)*9)
 	solidNormals := math32.NewArrayF32(0, len(tris)*9)
+	solidUVs := math32.NewArrayF32(0, len(tris)*6)
 
 	for i, t := range tris {
 		na := smoothNormal(t.a, i)
@@ -480,15 +558,21 @@ func (s *Shape) Rebuild() {
 			nb.X, nb.Y, nb.Z,
 			nc.X, nc.Y, nc.Z,
 		)
+		solidUVs.Append(
+			t.ua.X, t.ua.Y,
+			t.ub.X, t.ub.Y,
+			t.uc.X, t.uc.Y,
+		)
 	}
 
 	solidGeom := geometry.NewGeometry()
 	solidGeom.AddVBO(gls.NewVBO(solidPositions).AddAttrib(gls.VertexPosition))
 	solidGeom.AddVBO(gls.NewVBO(solidNormals).AddAttrib(gls.VertexNormal))
+	solidGeom.AddVBO(gls.NewVBO(solidUVs).AddAttrib(gls.VertexTexcoord))
 
 	mat := s.Material
 	if mat == nil {
-		mat = material.NewStandard(&math32.Color{R: 0.7, G: 0.7, B: 0.75})
+		mat = MatDefaultShape()
 	}
 
 	s.solidMesh = graphic.NewMesh(solidGeom, mat)
@@ -498,8 +582,6 @@ func (s *Shape) Rebuild() {
 
 // --- Helper 2D profile builders ---
 
-// NewLineHalfCircle returns a 2D half-circle from (0, -radius) to (0, +radius).
-// Rotating this line N times around its length axis produces a closed sphere.
 func NewLineHalfCircle(radius float32, segments int) []Point2D {
 	if segments < 2 {
 		segments = 2
@@ -517,8 +599,6 @@ func NewLineHalfCircle(radius float32, segments int) []Point2D {
 	return pts
 }
 
-// NewLineCircle returns a closed 2D circle in the XY plane.
-// Combining rotation and lateral shift with this line produces a torus.
 func NewLineCircle(radius float32, segments int) []Point2D {
 	if segments < 3 {
 		segments = 3
@@ -535,8 +615,6 @@ func NewLineCircle(radius float32, segments int) []Point2D {
 	return pts
 }
 
-// NewLineRect returns a closed 2D rectangle starting at (0, 0).
-// Shifting this line with Rotate=false produces a rectangular box.
 func NewLineRect(width, height float32) []Point2D {
 	return []Point2D{
 		{X: 0, Y: 0},
@@ -556,7 +634,6 @@ func dist2D(a, b Point2D) float32 {
 }
 
 func triangulatePolygon2D(poly []Point2D) []int {
-	// Filter out consecutive duplicate vertices (including closing vertex) while preserving original indices
 	var indices []int
 	for i := range poly {
 		if len(indices) == 0 || dist2D(poly[indices[len(indices)-1]], poly[i]) >= 1e-5 {
