@@ -11,7 +11,6 @@ import (
 	"github.com/g3n/engine/gls"
 	"github.com/g3n/engine/graphic"
 	"github.com/g3n/engine/light"
-	"github.com/g3n/engine/material"
 	"github.com/g3n/engine/math32"
 	"github.com/g3n/engine/renderer"
 	"github.com/g3n/engine/window"
@@ -22,9 +21,6 @@ const (
 	gridCellSize  = 1.0   // Grootte van elk groen vierkant op de vloer
 	gridHalfCount = 100   // Aantal vierkanten in elke richting vanaf het midden
 
-	wheelRadius    float32 = 0.15
-	wheelBaseHalf  float32 = 0.80
-	trackWidthHalf float32 = 0.65
 	normalDriveMax float32 = 3.0  // Normale rijsnelheid (units/sec)
 	fastDriveMax   float32 = 7.0  // Snelle rijsnelheid met Shift (units/sec)
 	driveAccel     float32 = 4.5  // Versnelling (traagheid bij optrekken)
@@ -37,28 +33,12 @@ const (
 	spinAccel      float32 = 3.5  // Hoekversnelling
 )
 
-var wheelPositions = [4]Point3D{
-	{X: -trackWidthHalf, Y: 0.0, Z: wheelBaseHalf},  // 0: Links-voor
-	{X: trackWidthHalf, Y: 0.0, Z: wheelBaseHalf},   // 1: Rechts-voor
-	{X: -trackWidthHalf, Y: 0.0, Z: -wheelBaseHalf}, // 2: Links-achter
-	{X: trackWidthHalf, Y: 0.0, Z: -wheelBaseHalf},  // 3: Rechts-achter
-}
-
 type ZBotApp struct {
-	app          *app.Application
-	scene        *core.Node
-	world        *World
-	robot        *core.Node
-	floor        *graphic.Lines
-	chassis      *graphic.Mesh
-	centralArm   *core.Node
-	sideArmL     *core.Node
-	sideArmR     *core.Node
-	wheelSteer   [4]*core.Node
-	wheelRoll    [4]*core.Node
-	wheelYaw     [4]float32
-	wheelRollAng [4]float32
-	mode         int // 0: Ingeklapt, 1: SUV/Werkplatform, 2: Volledig Uitgeklapt, 3: Hand-locomotie
+	app   *app.Application
+	scene *core.Node
+	world *World
+	robot *Robot
+	floor *graphic.Lines
 }
 
 func moveToward(current, target, maxDelta float32) float32 {
@@ -107,12 +87,11 @@ func main() {
 		app:   application,
 		scene: scene,
 		world: NewWorld(scene),
-		mode:  0,
+		robot: NewRobot(scene),
 	}
 
-	// 3. Bouw de vloer, de Z-Bot hiërarchie en de wereldobjecten
+	// 3. Bouw de vloer en de wereldobjecten
 	zApp.BuildFloor()
-	zApp.BuildZBot()
 	zApp.world.Build()
 
 	// 4. Muisbesturing voor de camera
@@ -217,17 +196,18 @@ func main() {
 
 		switch kev.Key {
 		case window.Key1:
-			zApp.setMode(0) // Ingeklapt (Nesting Cassette)
+			zApp.robot.SetMode(0) // Ingeklapt (Nesting Cassette)
 		case window.Key2:
-			zApp.setMode(1) // SUV / Werkplatform Mode
+			zApp.robot.SetMode(1) // SUV / Werkplatform Mode
 		case window.Key3:
-			zApp.setMode(2) // Volledig Uitgeklapt Bimanual Mode
+			zApp.robot.SetMode(2) // Volledig Uitgeklapt Bimanual Mode
 		case window.Key4:
-			zApp.setMode(3) // Hand-locomotie Mode
+			zApp.robot.SetMode(3) // Hand-locomotie Mode
 		case window.KeyF:
 			application.SetFullScreen(!application.FullScreen())
 		case window.KeyM:
 			zApp.world.ToggleWireframe()
+			zApp.robot.SetWireframe(zApp.world.wireframe)
 		}
 	})
 
@@ -346,41 +326,7 @@ func main() {
 
 		SetNodePosition(zApp.robot, robotPos)
 		SetNodeRotation(zApp.robot, robotQuat)
-
-		// Bereken voor elk wiel de exacte lokale snelheidsvector (translatie + rotatie)
-		// zodat alle 4 wielen in de gereden richting sturen én rollen
-		for i := 0; i < 4; i++ {
-			wp := wheelPositions[i]
-
-			// v_wiel = v_robot + omega x r_wiel
-			wheelVel := Point3D{
-				X: velStrafe + angularVel*wp.Z,
-				Y: 0,
-				Z: velForward - angularVel*wp.X,
-			}
-			wheelSpeed := wheelVel.Length()
-
-			targetYaw := float32(0)
-			if wheelSpeed > 0.02 {
-				if wheelVel.Z >= 0 {
-					targetYaw = math32.Atan2(wheelVel.X, wheelVel.Z)
-				} else {
-					targetYaw = math32.Atan2(-wheelVel.X, -wheelVel.Z)
-				}
-			}
-
-			zApp.wheelYaw[i] = moveToward(zApp.wheelYaw[i], targetYaw, wheelPivotRate*dt)
-			steerQuat := NewQuatFromAxisAngle(Point3D{Y: 1}, zApp.wheelYaw[i])
-			SetNodeRotation(zApp.wheelSteer[i], steerQuat)
-
-			// Projecteer de wielsnelheid op de huidige rolrichting van het wiel
-			rollDir := steerQuat.Rotate(Point3D{Z: 1})
-			rimSpeed := wheelVel.Dot(rollDir)
-
-			zApp.wheelRollAng[i] += (rimSpeed / wheelRadius) * dt
-			rollQuat := NewQuatFromAxisAngle(Point3D{X: 1}, zApp.wheelRollAng[i])
-			SetNodeRotation(zApp.wheelRoll[i], rollQuat)
-		}
+		zApp.robot.UpdateWheels(velForward, velStrafe, angularVel, dt)
 
 		// Houd de oneindige groene rastervloer gecentreerd onder de robot
 		floorPos := Point3D{
@@ -418,120 +364,7 @@ func (z *ZBotApp) BuildFloor() {
 
 	geom.AddVBO(gls.NewVBO(positions).AddAttrib(gls.VertexPosition))
 
-	green := &math32.Color{R: 0.0, G: 0.85, B: 0.2}
-	matFloor := material.NewStandard(green)
-	matFloor.SetEmissiveColor(green)
-
-	z.floor = graphic.NewLines(geom, matFloor)
+	z.floor = graphic.NewLines(geom, MatFloorGrid())
 	SetNodePosition(z.floor, Point3D{Y: floorY})
 	z.scene.Add(z.floor)
-}
-
-func (z *ZBotApp) BuildZBot() {
-	z.robot = core.NewNode()
-	z.scene.Add(z.robot)
-
-	// Materialen
-	matChassis := material.NewStandard(&math32.Color{R: 0.15, G: 0.15, B: 0.18}) // Donker carbon/metaal
-	matArm := material.NewStandard(&math32.Color{R: 0.2, G: 0.6, B: 0.8})        // Industrieel blauw/teal
-	matSensor := material.NewStandard(&math32.Color{R: 0.9, G: 0.5, B: 0.1})     // Accent oranje/geel
-
-	// --- A. Basis Chassis (Skateboard Bakje) ---
-	chassisGeom := geometry.NewBox(1.2, 0.3, 2.0)
-	z.chassis = graphic.NewMesh(chassisGeom, matChassis)
-	SetNodePosition(z.chassis, Point3D{Y: 0.15})
-	z.robot.Add(z.chassis)
-
-	// Wielen (4 stuks met stuur- en rolhiërarchie + zichtbare spaak)
-	wheelGeom := geometry.NewCylinder(float64(wheelRadius), 0.1, 16, 1, true, true)
-	spokeGeom := geometry.NewBox(0.11, wheelRadius*1.8, 0.03)
-	matWheel := material.NewStandard(&math32.Color{R: 0.1, G: 0.1, B: 0.1})
-	matSpoke := material.NewStandard(&math32.Color{R: 0.85, G: 0.85, B: 0.85})
-	wheelAlignQuat := NewQuatFromAxisAngle(Point3D{Z: 1}, math.Pi/2)
-
-	for i, pos := range wheelPositions {
-		steerNode := core.NewNode()
-		SetNodePosition(steerNode, pos)
-
-		rollNode := core.NewNode()
-		steerNode.Add(rollNode)
-
-		wheel := graphic.NewMesh(wheelGeom, matWheel)
-		SetNodeRotation(wheel, wheelAlignQuat)
-		rollNode.Add(wheel)
-
-		spoke := graphic.NewMesh(spokeGeom, matSpoke)
-		rollNode.Add(spoke)
-
-		z.wheelSteer[i] = steerNode
-		z.wheelRoll[i] = rollNode
-		z.robot.Add(steerNode)
-	}
-
-	// --- B. Centrale Stam (Heftank / Hefkolom) ---
-	z.centralArm = core.NewNode()
-	centralGeom := geometry.NewBox(0.3, 1.2, 0.3)
-	centralMesh := graphic.NewMesh(centralGeom, matArm)
-	SetNodePosition(centralMesh, Point3D{Y: 0.6})
-	z.centralArm.Add(centralMesh)
-
-	// Sensor Head op de top van de centrale stam
-	sensorGeom := geometry.NewBox(0.25, 0.2, 0.25)
-	sensorMesh := graphic.NewMesh(sensorGeom, matSensor)
-	SetNodePosition(sensorMesh, Point3D{Y: 1.3})
-	z.centralArm.Add(sensorMesh)
-
-	z.robot.Add(z.centralArm)
-
-	// --- C. Twee Zijarmen (Montage aan de top van de centrale arm) ---
-	z.sideArmL = core.NewNode()
-	sideGeomL := geometry.NewBox(0.2, 1.0, 0.2)
-	sideMeshL := graphic.NewMesh(sideGeomL, matArm)
-	SetNodePosition(sideMeshL, Point3D{X: -0.3, Y: 0.5})
-	z.sideArmL.Add(sideMeshL)
-	z.centralArm.Add(z.sideArmL)
-
-	z.sideArmR = core.NewNode()
-	sideGeomR := geometry.NewBox(0.2, 1.0, 0.2)
-	sideMeshR := graphic.NewMesh(sideGeomR, matArm)
-	SetNodePosition(sideMeshR, Point3D{X: 0.3, Y: 0.5})
-	z.sideArmR.Add(sideMeshR)
-	z.centralArm.Add(z.sideArmR)
-
-	// Start in modus 0 (Ingeklapt)
-	z.setMode(0)
-}
-
-func (z *ZBotApp) setMode(newMode int) {
-	z.mode = newMode
-	switch z.mode {
-	case 0: // Ingeklapt (Nesting in bakje)
-		SetNodePosition(z.centralArm, Point3D{})
-		SetNodeRotation(z.centralArm, IdentityQuat())
-		SetNodePosition(z.sideArmL, Point3D{})
-		SetNodeRotation(z.sideArmL, IdentityQuat())
-		SetNodePosition(z.sideArmR, Point3D{})
-		SetNodeRotation(z.sideArmR, IdentityQuat())
-	case 1: // SUV / Werkplatform Mode
-		SetNodePosition(z.centralArm, Point3D{Y: 0.3, Z: -0.5})
-		SetNodeRotation(z.centralArm, NewQuatFromAxisAngle(Point3D{X: 1}, 0.3))
-		SetNodePosition(z.sideArmL, Point3D{X: -0.4, Y: 0.8})
-		SetNodeRotation(z.sideArmL, IdentityQuat())
-		SetNodePosition(z.sideArmR, Point3D{X: 0.4, Y: 0.8})
-		SetNodeRotation(z.sideArmR, IdentityQuat())
-	case 2: // Volledig Uitgeklapt Bimanual Mode
-		SetNodePosition(z.centralArm, Point3D{Y: 0.5})
-		SetNodeRotation(z.centralArm, IdentityQuat())
-		SetNodePosition(z.sideArmL, Point3D{X: -0.8, Y: 1.2, Z: 0.2})
-		SetNodeRotation(z.sideArmL, NewQuatFromAxisAngle(Point3D{Z: 1}, -0.5))
-		SetNodePosition(z.sideArmR, Point3D{X: 0.8, Y: 1.2, Z: 0.2})
-		SetNodeRotation(z.sideArmR, NewQuatFromAxisAngle(Point3D{Z: 1}, 0.5))
-	case 3: // Hand-locomotie Mode (op de handen lopen)
-		SetNodePosition(z.centralArm, Point3D{Y: 1.0})
-		SetNodeRotation(z.centralArm, NewQuatFromAxisAngle(Point3D{X: 1}, -0.5))
-		SetNodePosition(z.sideArmL, Point3D{X: -0.6, Z: 1.5})
-		SetNodeRotation(z.sideArmL, IdentityQuat())
-		SetNodePosition(z.sideArmR, Point3D{X: 0.6, Z: 1.5})
-		SetNodeRotation(z.sideArmR, IdentityQuat())
-	}
 }
