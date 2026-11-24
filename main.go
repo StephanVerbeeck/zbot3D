@@ -195,14 +195,26 @@ func main() {
 		shiftHeld = (kev.Mods&window.ModShift) != 0 || keysDown[window.KeyLeftShift] || keysDown[window.KeyRightShift]
 
 		switch kev.Key {
+		case window.Key0:
+			zApp.robot.SetMode(0)
 		case window.Key1:
-			zApp.robot.SetMode(0) // Ingeklapt (Nesting Cassette)
+			zApp.robot.SetMode(1)
 		case window.Key2:
-			zApp.robot.SetMode(1) // SUV / Werkplatform Mode
+			zApp.robot.SetMode(2)
 		case window.Key3:
-			zApp.robot.SetMode(2) // Volledig Uitgeklapt Bimanual Mode
+			zApp.robot.SetMode(3)
 		case window.Key4:
-			zApp.robot.SetMode(3) // Hand-locomotie Mode
+			zApp.robot.SetMode(4)
+		case window.Key5:
+			zApp.robot.SetMode(5)
+		case window.Key6:
+			zApp.robot.SetMode(6)
+		case window.Key7:
+			zApp.robot.SetMode(7)
+		case window.Key8:
+			zApp.robot.SetMode(8)
+		case window.Key9:
+			zApp.robot.SetMode(9)
 		case window.KeyF:
 			application.SetFullScreen(!application.FullScreen())
 		case window.KeyM:
