@@ -3,9 +3,14 @@ package main
 import (
 	"image"
 	"image/color"
+	"image/draw"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/g3n/engine/gls"
 	"github.com/g3n/engine/material"
@@ -31,6 +36,54 @@ type BitmapOptions struct {
 	Shininess float32
 	Tint      *math32.Color
 	Specular  *math32.Color
+}
+
+var (
+	imageCacheMu      sync.RWMutex
+	decodedImageCache = make(map[string]*image.RGBA)
+	fallbackChecker   *image.RGBA
+)
+
+func getFallbackChecker() *image.RGBA {
+	if fallbackChecker == nil {
+		fallbackChecker = GenerateCheckerBitmap(128, 128, 8, RGBA8(180, 180, 180, 255), RGBA8(90, 90, 90, 255))
+	}
+	return fallbackChecker
+}
+
+func loadCachedRGBA(path string) *image.RGBA {
+	native := filepath.FromSlash(path)
+
+	imageCacheMu.RLock()
+	cached, found := decodedImageCache[native]
+	imageCacheMu.RUnlock()
+	if found {
+		return cached
+	}
+
+	var rgba *image.RGBA
+	f, err := os.Open(native)
+	if err == nil {
+		src, _, decErr := image.Decode(f)
+		_ = f.Close()
+		if decErr == nil && src != nil {
+			if direct, ok := src.(*image.RGBA); ok {
+				rgba = direct
+			} else {
+				b := src.Bounds()
+				rgba = image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+				draw.Draw(rgba, rgba.Bounds(), src, b.Min, draw.Src)
+			}
+		}
+	}
+	if rgba == nil {
+		rgba = getFallbackChecker()
+	}
+
+	imageCacheMu.Lock()
+	decodedImageCache[native] = rgba
+	imageCacheMu.Unlock()
+	return rgba
 }
 
 // RGB constructs a math32.Color from 0..1 float components.
@@ -158,39 +211,10 @@ func NewBitmapMaterialFromRGBA(img *image.RGBA, opts BitmapOptions) *material.St
 	return mat
 }
 
-// NewBitmapMaterialFromFile loads an image file from disk into a repeating bitmap material.
-// If the file cannot be read, it falls back to a generated checkerboard bitmap so rendering continues cleanly.
+// NewBitmapMaterialFromFile loads an image file from disk (cached after first decode)
+// into a repeating bitmap material. Falls back to a generated checkerboard bitmap if unreadable.
 func NewBitmapMaterialFromFile(path string, opts BitmapOptions) *material.Standard {
-	tex, err := texture.NewTexture2DFromImage(filepath.FromSlash(path))
-	if err != nil {
-		fallback := GenerateCheckerBitmap(128, 128, 8, RGBA8(180, 180, 180, 255), RGBA8(90, 90, 90, 255))
-		return NewBitmapMaterialFromRGBA(fallback, opts)
-	}
-
-	tint := RGB(1.0, 1.0, 1.0)
-	if opts.Tint != nil {
-		tint = *opts.Tint
-	}
-	mat := NewSolidMaterialWithOptions(MaterialOptions{
-		Diffuse:   tint,
-		Specular:  opts.Specular,
-		Shininess: opts.Shininess,
-		Opacity:   1.0,
-	})
-
-	tex.SetWrapS(gls.REPEAT)
-	tex.SetWrapT(gls.REPEAT)
-	rx := opts.RepeatX
-	ry := opts.RepeatY
-	if rx <= 0 {
-		rx = 1.0
-	}
-	if ry <= 0 {
-		ry = 1.0
-	}
-	tex.SetRepeat(rx, ry)
-	mat.AddTexture(tex)
-	return mat
+	return NewBitmapMaterialFromRGBA(loadCachedRGBA(path), opts)
 }
 
 // NewBitmapMaterialFromFiles resolves the first existing file among `candidatePaths` and loads it as a repeating bitmap material.
@@ -238,6 +262,14 @@ func clampByte(v int) uint8 {
 		return 255
 	}
 	return uint8(v)
+}
+
+func setPixRGBA(img *image.RGBA, x, y int, r, g, b, a uint8) {
+	off := y*img.Stride + x*4
+	img.Pix[off] = r
+	img.Pix[off+1] = g
+	img.Pix[off+2] = b
+	img.Pix[off+3] = a
 }
 
 func lerpColor8(a, b color.RGBA, t float64) color.RGBA {
@@ -290,12 +322,12 @@ func GenerateBrickBitmap(width, height, rows, cols int, brickBase, brickAlt, mor
 
 			if localY < mortarPx || localX < mortarPx {
 				n := int(hash2D(x, y)%19) - 9
-				img.SetRGBA(x, y, color.RGBA{
-					R: clampByte(int(mortar.R) + n),
-					G: clampByte(int(mortar.G) + n),
-					B: clampByte(int(mortar.B) + n),
-					A: 255,
-				})
+				setPixRGBA(img, x, y,
+					clampByte(int(mortar.R)+n),
+					clampByte(int(mortar.G)+n),
+					clampByte(int(mortar.B)+n),
+					255,
+				)
 				continue
 			}
 
@@ -304,12 +336,12 @@ func GenerateBrickBitmap(width, height, rows, cols int, brickBase, brickAlt, mor
 			col := lerpColor8(brickBase, brickAlt, tone)
 			grain := int(hash2D(x*3, y*3)%21) - 10
 
-			img.SetRGBA(x, y, color.RGBA{
-				R: clampByte(int(col.R) + grain),
-				G: clampByte(int(col.G) + grain),
-				B: clampByte(int(col.B) + grain),
-				A: 255,
-			})
+			setPixRGBA(img, x, y,
+				clampByte(int(col.R)+grain),
+				clampByte(int(col.G)+grain),
+				clampByte(int(col.B)+grain),
+				255,
+			)
 		}
 	}
 	return img
@@ -351,12 +383,12 @@ func GenerateRoofTileBitmap(width, height, rows, cols int, tileBase, tileShadow,
 			grain := int(hash2D(x, y)%11) - 5
 			delta := tileTint + grain
 
-			img.SetRGBA(x, y, color.RGBA{
-				R: clampByte(int(col.R) + delta),
-				G: clampByte(int(col.G) + delta),
-				B: clampByte(int(col.B) + delta),
-				A: 255,
-			})
+			setPixRGBA(img, x, y,
+				clampByte(int(col.R)+delta),
+				clampByte(int(col.G)+delta),
+				clampByte(int(col.B)+delta),
+				255,
+			)
 		}
 	}
 	return img
@@ -367,18 +399,19 @@ func GenerateWoodBitmap(width, height int, baseCol, grainCol color.RGBA) *image.
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
 	for y := 0; y < height; y++ {
 		fy := float64(y) / float64(height)
+		sinY := math.Sin(fy*2.0*math.Pi) * 1.6
 		for x := 0; x < width; x++ {
 			fx := float64(x) / float64(width)
-			wave := math.Sin(fx*42.0 + math.Sin(fy*2.0*math.Pi)*1.6)
+			wave := math.Sin(fx*42.0 + sinY)
 			t := 0.5 + 0.5*wave
 			col := lerpColor8(baseCol, grainCol, t*0.75)
 			noise := int(hash2D(x, y/2)%15) - 7
-			img.SetRGBA(x, y, color.RGBA{
-				R: clampByte(int(col.R) + noise),
-				G: clampByte(int(col.G) + noise),
-				B: clampByte(int(col.B) + noise),
-				A: 255,
-			})
+			setPixRGBA(img, x, y,
+				clampByte(int(col.R)+noise),
+				clampByte(int(col.G)+noise),
+				clampByte(int(col.B)+noise),
+				255,
+			)
 		}
 	}
 	return img
@@ -400,7 +433,7 @@ func GenerateStoneBitmap(width, height int, baseCol, speckCol color.RGBA) *image
 			} else if h > 90 {
 				col = lerpColor8(col, RGBA8(245, 245, 245, 255), 0.30)
 			}
-			img.SetRGBA(x, y, col)
+			setPixRGBA(img, x, y, col.R, col.G, col.B, col.A)
 		}
 	}
 	return img
@@ -414,12 +447,12 @@ func GenerateBrushedMetalBitmap(width, height int, baseCol color.RGBA) *image.RG
 		for x := 0; x < width; x++ {
 			micro := int(hash2D(x/4, y)%9) - 4
 			d := streak + micro
-			img.SetRGBA(x, y, color.RGBA{
-				R: clampByte(int(baseCol.R) + d),
-				G: clampByte(int(baseCol.G) + d),
-				B: clampByte(int(baseCol.B) + d),
-				A: 255,
-			})
+			setPixRGBA(img, x, y,
+				clampByte(int(baseCol.R)+d),
+				clampByte(int(baseCol.G)+d),
+				clampByte(int(baseCol.B)+d),
+				255,
+			)
 		}
 	}
 	return img
@@ -438,9 +471,9 @@ func GenerateCheckerBitmap(width, height, cells int, colA, colB color.RGBA) *ima
 		for x := 0; x < width; x++ {
 			cx := int(float64(x) / cellW)
 			if (cx+cy)%2 == 0 {
-				img.SetRGBA(x, y, colA)
+				setPixRGBA(img, x, y, colA.R, colA.G, colA.B, colA.A)
 			} else {
-				img.SetRGBA(x, y, colB)
+				setPixRGBA(img, x, y, colB.R, colB.G, colB.B, colB.A)
 			}
 		}
 	}
