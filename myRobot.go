@@ -16,6 +16,9 @@ const (
 	spokeWidth  float32 = 0.11
 	spokeHeight float32 = wheelRadius * 1.8
 	spokeDepth  float32 = 0.03
+
+	postureTransitionFrames = 100
+	postureDOFCount         = 3
 )
 
 var wheelPositions = [4]Point3D{
@@ -25,18 +28,20 @@ var wheelPositions = [4]Point3D{
 	{X: trackWidthHalf, Y: 0.0, Z: -wheelBaseHalf},  // 3: Rechts-achter
 }
 
-// Robot represents the 3D Z-Bot node hierarchy and its ShapeInfo-constructed body parts.
+// Robot represents the 3D Z-Bot node hierarchy, its ShapeInfo-constructed body parts,
+// and the Hinge joints driving smooth upper-body posture transitions.
 type Robot struct {
 	core.Node
 
 	chassis      *Shape
-	centralArm   *core.Node
 	centralBeam  *Shape
 	sensorHead   *Shape
-	sideArmL     *core.Node
-	sideArmR     *core.Node
 	sideBeamL    *Shape
 	sideBeamR    *Shape
+	centralHinge *Hinge
+	sensorHinge  *Hinge
+	sideHingeL   *Hinge
+	sideHingeR   *Hinge
 	wheelSteer   [4]*core.Node
 	wheelRoll    [4]*core.Node
 	wheelShapes  [4]*Shape
@@ -45,7 +50,14 @@ type Robot struct {
 	wireframe    bool
 	wheelYaw     [4]float32
 	wheelRollAng [4]float32
-	mode         int // 0: Ingeklapt, 1: SUV/Werkplatform, 2: Volledig Uitgeklapt, 3: Hand-locomotie
+
+	mode               int // 0: Ingeklapt, 1: SUV/Werkplatform, 2: Volledig Uitgeklapt, 3: Hand-locomotie
+	targetMode         int
+	postureStep        int
+	startCentralRatios [postureDOFCount]float32
+	startSideLRatios   [postureDOFCount]float32
+	startSideRRatios   [postureDOFCount]float32
+	targetRatios       [postureDOFCount]float32
 }
 
 // NewRobot creates a new Z-Bot, constructs all body parts via ShapeInfo.New(), and attaches it to `scene`.
@@ -68,7 +80,7 @@ func (r *Robot) addPart(parent *core.Node, info ShapeInfo, pos Point3D, rot Quat
 	return part
 }
 
-// Build constructs every body part of the Z-Bot using ShapeInfo.New().
+// Build constructs every body part of the Z-Bot using ShapeInfo.New() and wires the upper-body Hinges.
 func (r *Robot) Build() {
 	// --- ShapeInfo definities voor alle robotonderdelen ---
 	chassisInfo := ShapeInfo{
@@ -124,7 +136,8 @@ func (r *Robot) Build() {
 	}
 
 	// --- A. Basis Chassis (Skateboard Bakje: 1.2 x 0.3 x 2.0 gecentreerd op Y=0.15) ---
-	r.chassis = r.addPart(&r.Node, chassisInfo, Point3D{X: -0.6, Y: 0.0, Z: -1.0}, IdentityQuat())
+	chassisAt := AtMove(Point3D{X: -0.6, Y: 0.0, Z: -1.0})
+	r.chassis = r.addPart(&r.Node, chassisInfo, chassisAt.Move, chassisAt.Turn)
 
 	// --- B. Wielen (4 stuks met stuur- en rolhiërarchie + zichtbare spaak) ---
 	wheelAlignQuat := NewQuatFromAxisAngle(Point3D{Z: 1}, math.Pi/2)
@@ -146,23 +159,55 @@ func (r *Robot) Build() {
 		r.Add(steerNode)
 	}
 
-	// --- C. Centrale Stam (Hefkolom + Sensor Head) ---
-	r.centralArm = core.NewNode()
-	r.centralBeam = r.addPart(r.centralArm, centralArmInfo, Point3D{X: -0.15, Y: 0.0, Z: -0.15}, IdentityQuat())
-	r.sensorHead = r.addPart(r.centralArm, sensorInfo, Point3D{X: -0.125, Y: 1.2, Z: -0.125}, IdentityQuat())
-	r.Add(r.centralArm)
+	// --- C. Bovenlichaam onderdelen & Hinges ---
+	r.centralBeam = r.addPart(&r.Node, centralArmInfo, Point3D{}, IdentityQuat())
+	r.sensorHead = r.addPart(&r.Node, sensorInfo, Point3D{}, IdentityQuat())
+	r.sideBeamL = r.addPart(&r.Node, sideArmInfo, Point3D{}, IdentityQuat())
+	r.sideBeamR = r.addPart(&r.Node, sideArmInfo, Point3D{}, IdentityQuat())
 
-	// --- D. Twee Zijarmen (Montage aan de centrale arm) ---
-	r.sideArmL = core.NewNode()
-	r.sideBeamL = r.addPart(r.sideArmL, sideArmInfo, Point3D{X: -0.4, Y: 0.0, Z: -0.1}, IdentityQuat())
-	r.centralArm.Add(r.sideArmL)
+	chassisInv := chassisAt.Inverse()
+	beamOffset := AtMove(Point3D{X: -0.15, Y: 0.0, Z: -0.15})
+	beamOffsetInv := beamOffset.Inverse()
+	sensorOffset := AtMove(Point3D{X: -0.125, Y: 1.2, Z: -0.125})
+	sideBeamLOffset := AtMove(Point3D{X: -0.4, Y: 0.0, Z: -0.1})
+	sideBeamROffset := AtMove(Point3D{X: 0.2, Y: 0.0, Z: -0.1})
 
-	r.sideArmR = core.NewNode()
-	r.sideBeamR = r.addPart(r.sideArmR, sideArmInfo, Point3D{X: 0.2, Y: 0.0, Z: -0.1}, IdentityQuat())
-	r.centralArm.Add(r.sideArmR)
+	centralPose := func(armAt At) At {
+		return chassisInv.At(armAt.At(beamOffset))
+	}
+	sideLPose := func(armAt At) At {
+		return beamOffsetInv.At(armAt.At(sideBeamLOffset))
+	}
+	sideRPose := func(armAt At) At {
+		return beamOffsetInv.At(armAt.At(sideBeamROffset))
+	}
 
-	// Start in modus 0 (Ingeklapt)
-	r.SetMode(0)
+	// 1. Centrale stam hinge (Parent: chassis -> Child: centralBeam)
+	r.centralHinge = NewHinge(r.chassis, chassisAt, r.centralBeam, centralPose(IdentityAt()))
+	r.centralHinge.AddDOF(0, centralPose(NewAtAxisAngle(Point3D{Y: 0.3, Z: -0.5}, Point3D{X: 1}, 0.3))) // Modus 1
+	r.centralHinge.AddDOF(0, centralPose(AtMove(Point3D{Y: 0.5})))                                      // Modus 2
+	r.centralHinge.AddDOF(0, centralPose(NewAtAxisAngle(Point3D{Y: 1.0}, Point3D{X: 1}, -0.5)))         // Modus 3
+
+	// 2. Sensor head hinge (Parent: centralBeam -> Child: sensorHead)
+	r.sensorHinge = NewHinge(r.centralBeam, r.centralHinge.Child.At, r.sensorHead, beamOffsetInv.At(sensorOffset))
+
+	// 3. Linker zijarm hinge (Parent: centralBeam -> Child: sideBeamL)
+	r.sideHingeL = NewHinge(r.centralBeam, r.centralHinge.Child.At, r.sideBeamL, sideLPose(IdentityAt()))
+	r.sideHingeL.AddDOF(0, sideLPose(AtMove(Point3D{X: -0.4, Y: 0.8})))                                      // Modus 1
+	r.sideHingeL.AddDOF(0, sideLPose(NewAtAxisAngle(Point3D{X: -0.8, Y: 1.2, Z: 0.2}, Point3D{Z: 1}, -0.5))) // Modus 2
+	r.sideHingeL.AddDOF(0, sideLPose(AtMove(Point3D{X: -0.6, Z: 1.5})))                                      // Modus 3
+
+	// 4. Rechter zijarm hinge (Parent: centralBeam -> Child: sideBeamR)
+	r.sideHingeR = NewHinge(r.centralBeam, r.centralHinge.Child.At, r.sideBeamR, sideRPose(IdentityAt()))
+	r.sideHingeR.AddDOF(0, sideRPose(AtMove(Point3D{X: 0.4, Y: 0.8})))                                     // Modus 1
+	r.sideHingeR.AddDOF(0, sideRPose(NewAtAxisAngle(Point3D{X: 0.8, Y: 1.2, Z: 0.2}, Point3D{Z: 1}, 0.5))) // Modus 2
+	r.sideHingeR.AddDOF(0, sideRPose(AtMove(Point3D{X: 0.6, Z: 1.5})))                                     // Modus 3
+
+	// Start direct in modus 0 (Ingeklapt)
+	r.mode = 0
+	r.targetMode = 0
+	r.postureStep = postureTransitionFrames
+	r.updateUpperBodyHinges()
 }
 
 // SetWireframe switches all robot Shape parts between solid and wireframe rendering.
@@ -173,8 +218,11 @@ func (r *Robot) SetWireframe(wireframe bool) {
 	}
 }
 
-// UpdateWheels computes 4WS steering angles and rolling rotations from local robot velocities.
+// UpdateWheels computes 4WS steering angles and rolling rotations from local robot velocities,
+// and advances any active upper-body posture transition by one frame step.
 func (r *Robot) UpdateWheels(velForward, velStrafe, angularVel, dt float32) {
+	r.UpdatePosture()
+
 	for i := 0; i < 4; i++ {
 		wp := wheelPositions[i]
 
@@ -209,37 +257,86 @@ func (r *Robot) UpdateWheels(velForward, velStrafe, angularVel, dt float32) {
 	}
 }
 
-// SetMode sets the Z-Bot upper body to one of its standard postures.
-func (r *Robot) SetMode(newMode int) {
-	r.mode = newMode
-	switch r.mode {
-	case 0: // Ingeklapt (Nesting in bakje)
-		SetNodePosition(r.centralArm, Point3D{})
-		SetNodeRotation(r.centralArm, IdentityQuat())
-		SetNodePosition(r.sideArmL, Point3D{})
-		SetNodeRotation(r.sideArmL, IdentityQuat())
-		SetNodePosition(r.sideArmR, Point3D{})
-		SetNodeRotation(r.sideArmR, IdentityQuat())
-	case 1: // SUV / Werkplatform Mode
-		SetNodePosition(r.centralArm, Point3D{Y: 0.3, Z: -0.5})
-		SetNodeRotation(r.centralArm, NewQuatFromAxisAngle(Point3D{X: 1}, 0.3))
-		SetNodePosition(r.sideArmL, Point3D{X: -0.4, Y: 0.8})
-		SetNodeRotation(r.sideArmL, IdentityQuat())
-		SetNodePosition(r.sideArmR, Point3D{X: 0.4, Y: 0.8})
-		SetNodeRotation(r.sideArmR, IdentityQuat())
-	case 2: // Volledig Uitgeklapt Bimanual Mode
-		SetNodePosition(r.centralArm, Point3D{Y: 0.5})
-		SetNodeRotation(r.centralArm, IdentityQuat())
-		SetNodePosition(r.sideArmL, Point3D{X: -0.8, Y: 1.2, Z: 0.2})
-		SetNodeRotation(r.sideArmL, NewQuatFromAxisAngle(Point3D{Z: 1}, -0.5))
-		SetNodePosition(r.sideArmR, Point3D{X: 0.8, Y: 1.2, Z: 0.2})
-		SetNodeRotation(r.sideArmR, NewQuatFromAxisAngle(Point3D{Z: 1}, 0.5))
-	case 3: // Hand-locomotie Mode (op de handen lopen)
-		SetNodePosition(r.centralArm, Point3D{Y: 1.0})
-		SetNodeRotation(r.centralArm, NewQuatFromAxisAngle(Point3D{X: 1}, -0.5))
-		SetNodePosition(r.sideArmL, Point3D{X: -0.6, Z: 1.5})
-		SetNodeRotation(r.sideArmL, IdentityQuat())
-		SetNodePosition(r.sideArmR, Point3D{X: 0.6, Z: 1.5})
-		SetNodeRotation(r.sideArmR, IdentityQuat())
+func modeRatios(mode int) [postureDOFCount]float32 {
+	var ratios [postureDOFCount]float32
+	if mode >= 1 && mode <= postureDOFCount {
+		ratios[mode-1] = 1.0
 	}
+	return ratios
+}
+
+func captureDOFRatios(h *Hinge) [postureDOFCount]float32 {
+	var ratios [postureDOFCount]float32
+	if h == nil {
+		return ratios
+	}
+	for i := 0; i < postureDOFCount && i < len(h.DOF); i++ {
+		ratios[i] = h.DOF[i].Ratio
+	}
+	return ratios
+}
+
+func applyLerpedDOFRatios(h *Hinge, start, target [postureDOFCount]float32, t float32) {
+	if h == nil {
+		return
+	}
+	for i := 0; i < postureDOFCount && i < len(h.DOF); i++ {
+		h.DOF[i].Ratio = start[i] + (target[i]-start[i])*t
+	}
+}
+
+func (r *Robot) updateUpperBodyHinges() {
+	if r.centralHinge == nil {
+		return
+	}
+	centralWorld := r.centralHinge.Update()
+
+	if r.sensorHinge != nil {
+		r.sensorHinge.Parent.At = centralWorld
+		r.sensorHinge.Update()
+	}
+	if r.sideHingeL != nil {
+		r.sideHingeL.Parent.At = centralWorld
+		r.sideHingeL.Update()
+	}
+	if r.sideHingeR != nil {
+		r.sideHingeR.Parent.At = centralWorld
+		r.sideHingeR.Update()
+	}
+}
+
+// UpdatePosture advances the upper-body hinge interpolation by 1 frame step (out of 100)
+// whenever a posture change is in progress.
+func (r *Robot) UpdatePosture() {
+	if r.postureStep >= postureTransitionFrames {
+		return
+	}
+	r.postureStep++
+	t := float32(r.postureStep) / float32(postureTransitionFrames)
+
+	applyLerpedDOFRatios(r.centralHinge, r.startCentralRatios, r.targetRatios, t)
+	applyLerpedDOFRatios(r.sideHingeL, r.startSideLRatios, r.targetRatios, t)
+	applyLerpedDOFRatios(r.sideHingeR, r.startSideRRatios, r.targetRatios, t)
+	r.updateUpperBodyHinges()
+
+	if r.postureStep == postureTransitionFrames {
+		r.mode = r.targetMode
+	}
+}
+
+// SetMode starts a 100-frame hinge transition of the Z-Bot upper body to `newMode` (0..3).
+func (r *Robot) SetMode(newMode int) {
+	if newMode < 0 || newMode > postureDOFCount {
+		return
+	}
+	if newMode == r.targetMode && r.postureStep >= postureTransitionFrames {
+		return
+	}
+
+	r.startCentralRatios = captureDOFRatios(r.centralHinge)
+	r.startSideLRatios = captureDOFRatios(r.sideHingeL)
+	r.startSideRRatios = captureDOFRatios(r.sideHingeR)
+	r.targetRatios = modeRatios(newMode)
+	r.targetMode = newMode
+	r.postureStep = 0
 }
