@@ -8,6 +8,8 @@ import (
 )
 
 const (
+	twoPi float32 = 2.0 * math.Pi
+
 	wheelRadius    float32 = 0.15
 	wheelWidth     float32 = 0.10
 	wheelBaseHalf  float32 = 0.80
@@ -48,9 +50,196 @@ const (
 	fingerLength float32 = 0.24
 	fingerDepth  float32 = 0.12
 
+	postureCount            = 10 // Houdingen 0..9
 	postureTransitionFrames = 100
-	postureDOFCount         = 9 // Modes 1..9 (Mode 0 is FromAt)
 )
+
+// Fysieke bewegingsgrenzen in omwentelingen (turns: 1.0 = 1 volledige rotatie = 360°).
+// Elk scharnier heeft uitsluitend 1 of 2 fysieke buigrichtingen (bijv. pitch en roll/yaw).
+const (
+	lowerCenterPitchMin float32 = -0.08
+	lowerCenterPitchMax float32 = 0.26
+
+	upperCenterPitchMin float32 = -0.498
+	upperCenterPitchMax float32 = -0.015
+
+	cameraPitchMin float32 = 0.04
+	cameraPitchMax float32 = 0.498
+
+	shoulderPitchMin float32 = 0.02
+	shoulderPitchMax float32 = 0.498
+
+	shoulderRollLMin float32 = -0.05
+	shoulderRollLMax float32 = 0.27
+
+	shoulderRollRMin float32 = -0.27
+	shoulderRollRMax float32 = 0.05
+
+	elbowPitchMin float32 = -0.498
+	elbowPitchMax float32 = 0.00
+
+	elbowRollMin float32 = -0.07
+	elbowRollMax float32 = 0.07
+
+	wristPitchMin float32 = -0.025
+	wristPitchMax float32 = 0.465
+
+	wristYawLMin float32 = 0.00
+	wristYawLMax float32 = 0.26
+
+	wristYawRMin float32 = -0.26
+	wristYawRMax float32 = 0.00
+
+	jawOpenTurns float32 = 0.083 // ~30° opening per vinger
+)
+
+// PostureTurns legt voor één houding (0..9) de gewenste hoeken in omwentelingen (turns) vast
+// voor elke fysieke vrijheidsgraad van elk scharnier (1.0 = 1 volledige rotatie).
+type PostureTurns struct {
+	LowerCenterPitch float32    // 1 DOF: pitchX
+	UpperCenterPitch float32    // 1 DOF: pitchX
+	CameraPitch      float32    // 1 DOF: pitchX
+	UpperSideL       [2]float32 // 2 DOFs: [0]=pitchX, [1]=rollZ
+	LowerSideL       [2]float32 // 2 DOFs: [0]=pitchX, [1]=rollZ
+	UpperSideR       [2]float32 // 2 DOFs: [0]=pitchX, [1]=rollZ
+	LowerSideR       [2]float32 // 2 DOFs: [0]=pitchX, [1]=rollZ
+	WristL           [2]float32 // 2 DOFs: [0]=pitchX, [1]=yawY
+	WristR           [2]float32 // 2 DOFs: [0]=pitchX, [1]=yawY
+	GripperOpen      float32    // 1 DOF per vinger: 0.0 (dicht) .. 1.0 (open)
+}
+
+var robotPostures = [postureCount]PostureTurns{
+	// 0: Volledig opgevouwen in het chassis-bakje onder de rand (Y: +0.21 .. +0.69)
+	{
+		LowerCenterPitch: 0.250,
+		UpperCenterPitch: -0.498,
+		CameraPitch:      0.496,
+		UpperSideL:       [2]float32{0.498, 0.000},
+		LowerSideL:       [2]float32{-0.496, 0.000},
+		UpperSideR:       [2]float32{0.498, 0.000},
+		LowerSideR:       [2]float32{-0.496, 0.000},
+		WristL:           [2]float32{0.462, 0.000},
+		WristR:           [2]float32{0.462, 0.000},
+		GripperOpen:      0.00,
+	},
+	// 1: Klassieke Z-werkhouding
+	{
+		LowerCenterPitch: 0.108,
+		UpperCenterPitch: -0.226,
+		CameraPitch:      0.342,
+		UpperSideL:       [2]float32{0.279, 0.019},
+		LowerSideL:       [2]float32{-0.151, 0.000},
+		UpperSideR:       [2]float32{0.279, -0.019},
+		LowerSideR:       [2]float32{-0.151, 0.000},
+		WristL:           [2]float32{0.088, 0.000},
+		WristR:           [2]float32{0.088, 0.000},
+		GripperOpen:      0.45,
+	},
+	// 2: Zeer hoog reikend
+	{
+		LowerCenterPitch: 0.019,
+		UpperCenterPitch: -0.038,
+		CameraPitch:      0.151,
+		UpperSideL:       [2]float32{0.024, 0.013},
+		LowerSideL:       [2]float32{-0.016, -0.010},
+		UpperSideR:       [2]float32{0.024, -0.013},
+		LowerSideR:       [2]float32{-0.016, 0.010},
+		WristL:           [2]float32{0.000, 0.000},
+		WristR:           [2]float32{0.000, 0.000},
+		GripperOpen:      1.00,
+	},
+	// 3: Zeer breed gespreide armen (T-pose)
+	{
+		LowerCenterPitch: 0.067,
+		UpperCenterPitch: -0.134,
+		CameraPitch:      0.322,
+		UpperSideL:       [2]float32{0.072, 0.247},
+		LowerSideL:       [2]float32{0.000, 0.006},
+		UpperSideR:       [2]float32{0.072, -0.247},
+		LowerSideR:       [2]float32{0.000, -0.006},
+		WristL:           [2]float32{0.000, 0.064},
+		WristR:           [2]float32{0.000, -0.064},
+		GripperOpen:      0.85,
+	},
+	// 4: Zeer laag vooruit reikend
+	{
+		LowerCenterPitch: 0.151,
+		UpperCenterPitch: -0.215,
+		CameraPitch:      0.406,
+		UpperSideL:       [2]float32{0.470, 0.032},
+		LowerSideL:       [2]float32{-0.135, -0.016},
+		UpperSideR:       [2]float32{0.470, -0.032},
+		LowerSideR:       [2]float32{-0.135, 0.016},
+		WristL:           [2]float32{-0.024, 0.000},
+		WristR:           [2]float32{-0.024, 0.000},
+		GripperOpen:      0.90,
+	},
+	// 5: Laag en breed zijwaarts reikend
+	{
+		LowerCenterPitch: 0.135,
+		UpperCenterPitch: -0.223,
+		CameraPitch:      0.406,
+		UpperSideL:       [2]float32{0.470, 0.135},
+		LowerSideL:       [2]float32{-0.119, 0.029},
+		UpperSideR:       [2]float32{0.470, -0.135},
+		LowerSideR:       [2]float32{-0.119, -0.029},
+		WristL:           [2]float32{0.000, 0.056},
+		WristR:           [2]float32{0.000, -0.056},
+		GripperOpen:      0.75,
+	},
+	// 6: Ver vooruit gestrekt
+	{
+		LowerCenterPitch: 0.167,
+		UpperCenterPitch: -0.175,
+		CameraPitch:      0.271,
+		UpperSideL:       [2]float32{0.266, 0.022},
+		LowerSideL:       [2]float32{0.000, -0.016},
+		UpperSideR:       [2]float32{0.266, -0.022},
+		LowerSideR:       [2]float32{0.000, 0.016},
+		WristL:           [2]float32{0.000, 0.032},
+		WristR:           [2]float32{0.000, -0.032},
+		GripperOpen:      0.80,
+	},
+	// 7: Achterwaartse kraanhouding
+	{
+		LowerCenterPitch: -0.072,
+		UpperCenterPitch: -0.135,
+		CameraPitch:      0.064,
+		UpperSideL:       [2]float32{0.040, 0.056},
+		LowerSideL:       [2]float32{-0.095, -0.032},
+		UpperSideR:       [2]float32{0.040, -0.056},
+		LowerSideR:       [2]float32{-0.095, 0.032},
+		WristL:           [2]float32{-0.024, 0.000},
+		WristR:           [2]float32{-0.024, 0.000},
+		GripperOpen:      0.50,
+	},
+	// 8: Hand-lopen basishouding (beide handen links en rechts op de grond)
+	{
+		LowerCenterPitch: 0.150,
+		UpperCenterPitch: -0.264,
+		CameraPitch:      0.414,
+		UpperSideL:       [2]float32{0.438, 0.099},
+		LowerSideL:       [2]float32{-0.014, 0.000},
+		UpperSideR:       [2]float32{0.438, -0.099},
+		LowerSideR:       [2]float32{-0.014, 0.000},
+		WristL:           [2]float32{0.000, 0.250},
+		WristR:           [2]float32{0.000, -0.250},
+		GripperOpen:      1.00,
+	},
+	// 9: Hand-lopen stap (linkerhand vooruit op de grond, rechterhand achteruit op de grond)
+	{
+		LowerCenterPitch: 0.150,
+		UpperCenterPitch: -0.264,
+		CameraPitch:      0.414,
+		UpperSideL:       [2]float32{0.379, 0.092},
+		LowerSideL:       [2]float32{0.000, 0.000},
+		UpperSideR:       [2]float32{0.485, -0.103},
+		LowerSideR:       [2]float32{-0.072, 0.000},
+		WristL:           [2]float32{0.000, 0.250},
+		WristR:           [2]float32{0.000, -0.250},
+		GripperOpen:      1.00,
+	},
+}
 
 var wheelPositions = [4]Point3D{
 	{X: -trackWidthHalf, Y: 0.0, Z: wheelBaseHalf},  // 0: Links-voor
@@ -109,23 +298,33 @@ type Robot struct {
 	wheelYaw     [4]float32
 	wheelRollAng [4]float32
 
-	mode                  int // 0..9 postures
-	targetMode            int
-	postureStep           int
-	startLowerRatios      [postureDOFCount]float32
-	startUpperRatios      [postureDOFCount]float32
-	startCameraRatios     [postureDOFCount]float32
-	startUpperSideLRatios [postureDOFCount]float32
-	startLowerSideLRatios [postureDOFCount]float32
-	startUpperSideRRatios [postureDOFCount]float32
-	startLowerSideRRatios [postureDOFCount]float32
-	startWristLRatios     [postureDOFCount]float32
-	startWristRRatios     [postureDOFCount]float32
-	targetRatios          [postureDOFCount]float32
-	startGripL            float32
-	startGripR            float32
-	targetGripL           float32
-	targetGripR           float32
+	mode        int // 0..9 postures
+	targetMode  int
+	postureStep int
+
+	startLowerDOF       [1]float32
+	targetLowerDOF      [1]float32
+	startUpperDOF       [1]float32
+	targetUpperDOF      [1]float32
+	startCameraDOF      [1]float32
+	targetCameraDOF     [1]float32
+	startUpperSideLDOF  [2]float32
+	targetUpperSideLDOF [2]float32
+	startLowerSideLDOF  [2]float32
+	targetLowerSideLDOF [2]float32
+	startUpperSideRDOF  [2]float32
+	targetUpperSideRDOF [2]float32
+	startLowerSideRDOF  [2]float32
+	targetLowerSideRDOF [2]float32
+	startWristLDOF      [2]float32
+	targetWristLDOF     [2]float32
+	startWristRDOF      [2]float32
+	targetWristRDOF     [2]float32
+
+	startGripL  float32
+	startGripR  float32
+	targetGripL float32
+	targetGripR float32
 }
 
 // NewRobot creates a new Z-Bot, constructs all body parts via ShapeInfo.New(), and attaches it to `scene`.
@@ -155,8 +354,26 @@ func hingePose(parentJoint Point3D, rot Quat, childPivot Point3D) At {
 	return NewAt(parentJoint, rot).At(AtMove(childPivot.Scale(-1)))
 }
 
+func turnsToRad(turns float32) float32 {
+	return turns * twoPi
+}
+
+func turnsToRatio(turns, minTurns, maxTurns float32) float32 {
+	if maxTurns == minTurns {
+		return 0
+	}
+	ratio := (turns - minTurns) / (maxTurns - minTurns)
+	if ratio < 0 {
+		return 0
+	}
+	if ratio > 1 {
+		return 1
+	}
+	return ratio
+}
+
 // Build constructs every body part of the Z-Bot using ShapeInfo.New() and connects the entire
-// upper-body kinematic tree (2-part center arm -> camera head + 2-part left/right arms -> wrists -> grippers) via Hinges.
+// upper-body kinematic tree via Hinges, each configured with 1 or 2 physical degrees of freedom.
 func (r *Robot) Build() {
 	// --- ShapeInfo definities voor alle robotonderdelen ---
 	chassisFloorInfo := ShapeInfo{
@@ -256,12 +473,21 @@ func (r *Robot) Build() {
 		Lines:    [][]Point2D{NewLineRect(fingerWidth, fingerLength)},
 	}
 
+	rotX := func(turns float32) Quat {
+		return NewQuatFromAxisAngle(Point3D{X: 1}, turnsToRad(turns))
+	}
+	rotY := func(turns float32) Quat {
+		return NewQuatFromAxisAngle(Point3D{Y: 1}, turnsToRad(turns))
+	}
+	rotZ := func(turns float32) Quat {
+		return NewQuatFromAxisAngle(Point3D{Z: 1}, turnsToRad(turns))
+	}
+
 	// --- A. Basis Chassis: uitstekende mechaniek-bodem + open bakje erbovenop ---
 	halfW := chassisWidth * 0.5
 	halfL := chassisLength * 0.5
 	trayFloorY := chassisFloorBottomY + chassisFloorHeight // Y = +0.21
 
-	// Dikke mechaniek-bodem (Y: -0.09 .. +0.21) + onderste mechaniekbak (Y: -0.12 .. -0.06) tussen de wielen
 	chassisAt := AtMove(Point3D{X: -halfW, Y: chassisFloorBottomY, Z: -halfL})
 	r.chassis = r.addPart(&r.Node, chassisFloorInfo, chassisAt.Move, chassisAt.Turn)
 	r.chassisSump = r.addPart(&r.Node, chassisSumpInfo, Point3D{
@@ -270,16 +496,13 @@ func (r *Robot) Build() {
 		Z: -chassisSumpLength * 0.5,
 	}, IdentityQuat())
 
-	// Linker- en rechterrand over de volledige lengte (Z: -1.00 .. +1.00, Y: +0.21 .. +0.71)
 	r.rimLeft = r.addPart(&r.Node, sideRimInfo, Point3D{X: -halfW, Y: trayFloorY, Z: -halfL}, IdentityQuat())
 	r.rimRight = r.addPart(&r.Node, sideRimInfo, Point3D{X: halfW - chassisRimThickness, Y: trayFloorY, Z: -halfL}, IdentityQuat())
-
-	// Voor- en achterrand tussen de linker- en rechterrand (X: -0.52 .. +0.52, Y: +0.21 .. +0.71)
 	r.rimFront = r.addPart(&r.Node, endRimInfo, Point3D{X: -halfW + chassisRimThickness, Y: trayFloorY, Z: halfL - chassisRimThickness}, IdentityQuat())
 	r.rimBack = r.addPart(&r.Node, endRimInfo, Point3D{X: -halfW + chassisRimThickness, Y: trayFloorY, Z: -halfL}, IdentityQuat())
 
 	// --- B. Wielen (4 stuks met stuur- en rolhiërarchie + zichtbare spaak) ---
-	wheelAlignQuat := NewQuatFromAxisAngle(Point3D{Z: 1}, math.Pi/2)
+	wheelAlignQuat := rotZ(0.25) // Kwartslag om de wielcilinder op de X-as te leggen
 	wheelCenterOffset := Point3D{X: wheelWidth * 0.5}
 	spokeCenterOffset := Point3D{X: -spokeWidth * 0.5, Y: -spokeHeight * 0.5, Z: -spokeDepth * 0.5}
 
@@ -298,7 +521,7 @@ func (r *Robot) Build() {
 		r.Add(steerNode)
 	}
 
-	// --- C. Bovenlichaam Shapes (2-delige Z-middenarm + camerakop + 2x 2-delige zijarmen + polsen + grijpers) ---
+	// --- C. Bovenlichaam Shapes ---
 	r.lowerCenterArm = r.addPart(&r.Node, armSegmentInfo, Point3D{}, IdentityQuat())
 	r.upperCenterArm = r.addPart(&r.Node, armSegmentInfo, Point3D{}, IdentityQuat())
 	r.cameraHead = r.addPart(&r.Node, cameraInfo, Point3D{}, IdentityQuat())
@@ -315,244 +538,164 @@ func (r *Robot) Build() {
 	r.gripFingerR2 = r.addPart(&r.Node, fingerInfo, Point3D{}, IdentityQuat())
 
 	// --- D. Scharnierpunten (Joints & Pivots) ---
-	// Achterin het bakje op de bovenkant van de mechaniek-bodem (robotruimte: X = 0.0, Y = +0.33, Z = -0.88)
 	chassisRearJoint := Point3D{
 		X: halfW,
 		Y: chassisFloorHeight + armDepth*0.5,
 		Z: chassisRimThickness + 0.04,
 	}
 
-	// Alle 6 armsegmenten delen exact dezelfde dimensies (armWidth x armLength x armDepth)
 	armBasePivot := Point3D{X: armWidth * 0.5, Y: 0.0, Z: armDepth * 0.5}
-	armTipJoint := Point3D{X: armWidth * 0.5, Y: armLength, Z: armDepth * 0.5}
-
-	// Bovenrand-scharnier zodat het tweede armdeel in modus 0 vlak bovenop het eerste deel vouwt
 	armBaseTopPivot := Point3D{X: armWidth * 0.5, Y: 0.0, Z: 0.0}
 	armTipTopJoint := Point3D{X: armWidth * 0.5, Y: armLength, Z: 0.0}
 
-	// Camerakop bovenop het midden van het uiteinde van de bovenste middenarm
 	cameraFoldPivot := Point3D{X: cameraWidth * 0.5, Y: 0.0, Z: 0.0}
 	cameraLensMount := Point3D{X: cameraWidth * 0.5, Y: cameraHeight * 0.5, Z: cameraDepth}
 
-	// Links en rechts bovenop het uiteinde van de bovenste middenarm
-	upperCenterTopLeftJoint := Point3D{X: -armWidth*0.5 - 0.01, Y: armLength, Z: armDepth * 0.5}
-	upperCenterTopRightJoint := Point3D{X: armWidth + armWidth*0.5 + 0.01, Y: armLength, Z: armDepth * 0.5}
+	upperCenterSideLeftJoint := Point3D{X: -armWidth*0.5 - 0.01, Y: armLength, Z: armDepth}
+	upperCenterSideRightJoint := Point3D{X: armWidth + armWidth*0.5 + 0.01, Y: armLength, Z: armDepth}
 
 	wristPivot := Point3D{X: wristWidth * 0.5, Y: 0.0, Z: wristDepth * 0.5}
 	wristJawInnerJoint := Point3D{X: 0.035, Y: wristLength, Z: wristDepth * 0.5}
 	wristJawOuterJoint := Point3D{X: wristWidth - 0.035, Y: wristLength, Z: wristDepth * 0.5}
 	fingerPivot := Point3D{X: fingerWidth * 0.5, Y: 0.0, Z: fingerDepth * 0.5}
 
-	pitchX := func(rad float32) Quat {
-		return NewQuatFromAxisAngle(Point3D{X: 1}, rad)
-	}
-	yawY := func(rad float32) Quat {
-		return NewQuatFromAxisAngle(Point3D{Y: 1}, rad)
-	}
-	rollZ := func(rad float32) Quat {
-		return NewQuatFromAxisAngle(Point3D{Z: 1}, rad)
-	}
-
 	// =========================================================================
-	// 1. Onderste middenarm hinge (verbonden achterin het chassis-bakje)
+	// 1. Onderste middenarm scharnier: 1 DOF (rotX: voor/achter kantelen)
 	// =========================================================================
 	r.lowerCenterHinge = NewHinge(
 		r.chassis,
 		chassisAt,
 		r.lowerCenterArm,
-		hingePose(chassisRearJoint, pitchX(math.Pi*0.5), armBasePivot), // [0] Vlak op de bodem van het bakje
+		hingePose(chassisRearJoint, rotX(lowerCenterPitchMin), armBasePivot),
 	)
-	r.lowerCenterHinge.AddDOF(0, hingePose(chassisRearJoint, pitchX(0.68), armBasePivot))  // [1] Klassieke Z-vorm
-	r.lowerCenterHinge.AddDOF(0, hingePose(chassisRearJoint, pitchX(0.12), armBasePivot))  // [2] Zeer hoog reikend
-	r.lowerCenterHinge.AddDOF(0, hingePose(chassisRearJoint, pitchX(0.42), armBasePivot))  // [3] Zeer breed (T-pose)
-	r.lowerCenterHinge.AddDOF(0, hingePose(chassisRearJoint, pitchX(0.95), armBasePivot))  // [4] Zeer laag vooruit
-	r.lowerCenterHinge.AddDOF(0, hingePose(chassisRearJoint, pitchX(0.85), armBasePivot))  // [5] Laag & breed zijwaarts
-	r.lowerCenterHinge.AddDOF(0, hingePose(chassisRearJoint, pitchX(1.05), armBasePivot))  // [6] Ver vooruit reikend
-	r.lowerCenterHinge.AddDOF(0, hingePose(chassisRearJoint, pitchX(-0.35), armBasePivot)) // [7] Achterwaarts kraan
-	r.lowerCenterHinge.AddDOF(0, hingePose(chassisRearJoint, pitchX(0.94), armBasePivot))  // [8] Hand-lopen basis (links/rechts aan grond)
-	r.lowerCenterHinge.AddDOF(0, hingePose(chassisRearJoint, pitchX(0.91), armBasePivot))  // [9] Hand-lopen stap (asymmetrisch aan grond)
+	r.lowerCenterHinge.AddDOF(0, hingePose(chassisRearJoint, rotX(lowerCenterPitchMax), armBasePivot))
 
 	// =========================================================================
-	// 2. Bovenste middenarm hinge (vouwt in modus 0 als 2e laag onder de bakrand)
+	// 2. Bovenste middenarm scharnier: 1 DOF (rotX: Z-knik buigen/strekken)
 	// =========================================================================
 	r.upperCenterHinge = NewHinge(
 		r.lowerCenterArm,
 		r.lowerCenterHinge.Child.At,
 		r.upperCenterArm,
-		hingePose(armTipTopJoint, pitchX(-math.Pi), armBaseTopPivot), // [0] Vlak teruggevouwen in bakje (Y: +0.45..+0.69)
+		hingePose(armTipTopJoint, rotX(upperCenterPitchMin), armBaseTopPivot),
 	)
-	r.upperCenterHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(-1.42), armBaseTopPivot)) // [1] Klassieke Z-knik
-	r.upperCenterHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(-0.24), armBaseTopPivot)) // [2] Zeer hoog gestrekt
-	r.upperCenterHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(-0.84), armBaseTopPivot)) // [3] Zeer breed (T-pose)
-	r.upperCenterHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(-1.35), armBaseTopPivot)) // [4] Zeer laag vooruit
-	r.upperCenterHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(-1.40), armBaseTopPivot)) // [5] Laag & breed zijwaarts
-	r.upperCenterHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(-1.10), armBaseTopPivot)) // [6] Ver vooruit reikend
-	r.upperCenterHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(0.65), armBaseTopPivot))  // [7] Achterwaarts kraan
-	r.upperCenterHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(-1.66), armBaseTopPivot)) // [8] Hand-lopen basis
-	r.upperCenterHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(-1.64), armBaseTopPivot)) // [9] Hand-lopen stap
+	r.upperCenterHinge.AddDOF(0, hingePose(armTipTopJoint, rotX(upperCenterPitchMax), armBaseTopPivot))
 
 	// =========================================================================
-	// 2b. Camerakop hinge + lens (verdwijnt in modus 0 mee onder de bakrand)
+	// 3. Camerakop scharnier: 1 DOF (rotX: omhoog/omlaag kijken) + vaste lens
 	// =========================================================================
 	r.cameraHinge = NewHinge(
 		r.upperCenterArm,
 		r.upperCenterHinge.Child.At,
 		r.cameraHead,
-		hingePose(armTipTopJoint, pitchX(math.Pi), cameraFoldPivot), // [0] Vooruit geklapt binnen achterrand
+		hingePose(armTipTopJoint, rotX(cameraPitchMin), cameraFoldPivot),
 	)
-	r.cameraHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(2.15), cameraFoldPivot))  // [1] Gericht op Z-werkgebied
-	r.cameraHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(0.95), cameraFoldPivot))  // [2] Omhoog kijkend naar hoge grijpers
-	r.cameraHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(2.02), cameraFoldPivot))  // [3] Horizontaal vooruit (T-pose)
-	r.cameraHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(2.55), cameraFoldPivot))  // [4] Omlaag kijkend naar lage grijpers
-	r.cameraHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(2.55), cameraFoldPivot))  // [5] Omlaag & vooruit
-	r.cameraHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(1.70), cameraFoldPivot))  // [6] Recht vooruit langs lange reikwijdte
-	r.cameraHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(-2.10), cameraFoldPivot)) // [7] Achteruit kijkend (kraan)
-	r.cameraHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(2.60), cameraFoldPivot))  // [8] Vloerzicht vooruit (hand-lopen)
-	r.cameraHinge.AddDOF(0, hingePose(armTipTopJoint, pitchX(2.60), cameraFoldPivot))  // [9] Vloerzicht vooruit (hand-lopen stap)
+	r.cameraHinge.AddDOF(0, hingePose(armTipTopJoint, rotX(cameraPitchMax), cameraFoldPivot))
 
 	r.cameraLensHinge = NewHinge(
 		r.cameraHead,
 		r.cameraHinge.Child.At,
 		r.cameraLens,
-		hingePose(cameraLensMount, pitchX(math.Pi/2), Point3D{}),
+		hingePose(cameraLensMount, rotX(0.25), Point3D{}),
 	)
 
 	// =========================================================================
-	// 3L. Linker bovenarm hinge (gemonteerd links bovenop het uiteinde van de middenarm)
+	// 4L. Linker schouder scharnier: 2 DOFs ([0]=rotX voor/achter, [1]=rotZ zijwaarts)
 	// =========================================================================
+	shoulderLBase := rotX(shoulderPitchMin).Mul(rotZ(shoulderRollLMin))
 	r.upperSideHingeL = NewHinge(
 		r.upperCenterArm,
 		r.upperCenterHinge.Child.At,
 		r.upperSideArmL,
-		hingePose(upperCenterTopLeftJoint, pitchX(math.Pi), armBasePivot), // [0] Vlak naar voren op bakbodem
+		hingePose(upperCenterSideLeftJoint, shoulderLBase, armBasePivot),
 	)
-	r.upperSideHingeL.AddDOF(0, hingePose(upperCenterTopLeftJoint, pitchX(1.75).Mul(rollZ(0.12)), armBasePivot))  // [1] Werkhouding
-	r.upperSideHingeL.AddDOF(0, hingePose(upperCenterTopLeftJoint, pitchX(0.15).Mul(rollZ(0.08)), armBasePivot))  // [2] Zeer hoog reikend
-	r.upperSideHingeL.AddDOF(0, hingePose(upperCenterTopLeftJoint, pitchX(0.45).Mul(rollZ(1.55)), armBasePivot))  // [3] Zeer breed horizontaal links
-	r.upperSideHingeL.AddDOF(0, hingePose(upperCenterTopLeftJoint, pitchX(2.45).Mul(rollZ(0.22)), armBasePivot))  // [4] Zeer laag vooruit
-	r.upperSideHingeL.AddDOF(0, hingePose(upperCenterTopLeftJoint, pitchX(2.65).Mul(rollZ(0.85)), armBasePivot))  // [5] Laag & breed zijwaarts
-	r.upperSideHingeL.AddDOF(0, hingePose(upperCenterTopLeftJoint, pitchX(1.67).Mul(rollZ(0.14)), armBasePivot))  // [6] Ver vooruit reikend
-	r.upperSideHingeL.AddDOF(0, hingePose(upperCenterTopLeftJoint, pitchX(-1.35).Mul(rollZ(0.35)), armBasePivot)) // [7] Achterwaarts kraan
-	r.upperSideHingeL.AddDOF(0, hingePose(upperCenterTopLeftJoint, pitchX(2.82).Mul(rollZ(0.62)), armBasePivot))  // [8] Hand-lopen basis (links aan grond)
-	r.upperSideHingeL.AddDOF(0, hingePose(upperCenterTopLeftJoint, pitchX(2.52).Mul(rollZ(0.58)), armBasePivot))  // [9] Hand-lopen stap (links vooruit aan grond)
+	r.upperSideHingeL.AddDOF(0, hingePose(upperCenterSideLeftJoint, rotX(shoulderPitchMax).Mul(rotZ(shoulderRollLMin)), armBasePivot))
+	r.upperSideHingeL.AddDOF(0, hingePose(upperCenterSideLeftJoint, rotX(shoulderPitchMin).Mul(rotZ(shoulderRollLMax)), armBasePivot))
 
 	// =========================================================================
-	// 4L. Linker onderarm hinge (vouwt als 2e laag bovenop de linker bovenarm)
+	// 5L. Linker elleboog scharnier: 2 DOFs ([0]=rotX buigen/strekken, [1]=rotZ zijknik)
 	// =========================================================================
+	elbowBase := rotX(elbowPitchMin).Mul(rotZ(elbowRollMin))
 	r.lowerSideHingeL = NewHinge(
 		r.upperSideArmL,
 		r.upperSideHingeL.Child.At,
 		r.lowerSideArmL,
-		hingePose(armTipTopJoint, pitchX(-math.Pi), armBaseTopPivot), // [0] Vlak teruggevouwen in bakje
+		hingePose(armTipTopJoint, elbowBase, armBaseTopPivot),
 	)
-	r.lowerSideHingeL.AddDOF(0, hingePose(armTipTopJoint, pitchX(-0.95), armBaseTopPivot))                   // [1] Werkhouding
-	r.lowerSideHingeL.AddDOF(0, hingePose(armTipTopJoint, pitchX(-0.10).Mul(rollZ(-0.06)), armBaseTopPivot)) // [2] Zeer hoog gestrekt
-	r.lowerSideHingeL.AddDOF(0, hingePose(armTipTopJoint, rollZ(0.04), armBaseTopPivot))                     // [3] Zeer breed gestrekt
-	r.lowerSideHingeL.AddDOF(0, hingePose(armTipTopJoint, pitchX(0.75).Mul(rollZ(-0.12)), armBaseTopPivot))  // [4] Zeer laag naar vloer voor
-	r.lowerSideHingeL.AddDOF(0, hingePose(armTipTopJoint, pitchX(0.55).Mul(rollZ(0.18)), armBaseTopPivot))   // [5] Laag & breed naar vloer zij
-	r.lowerSideHingeL.AddDOF(0, hingePose(armTipTopJoint, rollZ(-0.10), armBaseTopPivot))                    // [6] Ver vooruit gestrekt
-	r.lowerSideHingeL.AddDOF(0, hingePose(armTipTopJoint, pitchX(-0.82).Mul(rollZ(-0.20)), armBaseTopPivot)) // [7] Achterwaarts kraan
-	r.lowerSideHingeL.AddDOF(0, hingePose(armTipTopJoint, rollZ(-0.62).Mul(pitchX(1.07)), armBaseTopPivot))  // [8] Hand-lopen basis (verticaal naar grond)
-	r.lowerSideHingeL.AddDOF(0, hingePose(armTipTopJoint, rollZ(-0.58).Mul(pitchX(1.38)), armBaseTopPivot))  // [9] Hand-lopen stap (links aan grond)
+	r.lowerSideHingeL.AddDOF(0, hingePose(armTipTopJoint, rotX(elbowPitchMax).Mul(rotZ(elbowRollMin)), armBaseTopPivot))
+	r.lowerSideHingeL.AddDOF(0, hingePose(armTipTopJoint, rotX(elbowPitchMin).Mul(rotZ(elbowRollMax)), armBaseTopPivot))
 
 	// =========================================================================
-	// 3R. Rechter bovenarm hinge (gemonteerd rechts bovenop het uiteinde van de middenarm)
+	// 4R. Rechter schouder scharnier: 2 DOFs ([0]=rotX voor/achter, [1]=rotZ zijwaarts)
 	// =========================================================================
+	shoulderRBase := rotX(shoulderPitchMin).Mul(rotZ(shoulderRollRMin))
 	r.upperSideHingeR = NewHinge(
 		r.upperCenterArm,
 		r.upperCenterHinge.Child.At,
 		r.upperSideArmR,
-		hingePose(upperCenterTopRightJoint, pitchX(math.Pi), armBasePivot), // [0] Vlak naar voren op bakbodem
+		hingePose(upperCenterSideRightJoint, shoulderRBase, armBasePivot),
 	)
-	r.upperSideHingeR.AddDOF(0, hingePose(upperCenterTopRightJoint, pitchX(1.75).Mul(rollZ(-0.12)), armBasePivot))  // [1] Werkhouding
-	r.upperSideHingeR.AddDOF(0, hingePose(upperCenterTopRightJoint, pitchX(0.15).Mul(rollZ(-0.08)), armBasePivot))  // [2] Zeer hoog reikend
-	r.upperSideHingeR.AddDOF(0, hingePose(upperCenterTopRightJoint, pitchX(0.45).Mul(rollZ(-1.55)), armBasePivot))  // [3] Zeer breed horizontaal rechts
-	r.upperSideHingeR.AddDOF(0, hingePose(upperCenterTopRightJoint, pitchX(2.45).Mul(rollZ(-0.22)), armBasePivot))  // [4] Zeer laag vooruit
-	r.upperSideHingeR.AddDOF(0, hingePose(upperCenterTopRightJoint, pitchX(2.65).Mul(rollZ(-0.85)), armBasePivot))  // [5] Laag & breed zijwaarts
-	r.upperSideHingeR.AddDOF(0, hingePose(upperCenterTopRightJoint, pitchX(1.67).Mul(rollZ(-0.14)), armBasePivot))  // [6] Ver vooruit reikend
-	r.upperSideHingeR.AddDOF(0, hingePose(upperCenterTopRightJoint, pitchX(-1.35).Mul(rollZ(-0.35)), armBasePivot)) // [7] Achterwaarts kraan
-	r.upperSideHingeR.AddDOF(0, hingePose(upperCenterTopRightJoint, pitchX(2.82).Mul(rollZ(-0.62)), armBasePivot))  // [8] Hand-lopen basis (rechts aan grond)
-	r.upperSideHingeR.AddDOF(0, hingePose(upperCenterTopRightJoint, pitchX(3.15).Mul(rollZ(-0.65)), armBasePivot))  // [9] Hand-lopen stap (rechts achter aan grond)
+	r.upperSideHingeR.AddDOF(0, hingePose(upperCenterSideRightJoint, rotX(shoulderPitchMax).Mul(rotZ(shoulderRollRMin)), armBasePivot))
+	r.upperSideHingeR.AddDOF(0, hingePose(upperCenterSideRightJoint, rotX(shoulderPitchMin).Mul(rotZ(shoulderRollRMax)), armBasePivot))
 
 	// =========================================================================
-	// 4R. Rechter onderarm hinge (vouwt als 2e laag bovenop de rechter bovenarm)
+	// 5R. Rechter elleboog scharnier: 2 DOFs ([0]=rotX buigen/strekken, [1]=rotZ zijknik)
 	// =========================================================================
 	r.lowerSideHingeR = NewHinge(
 		r.upperSideArmR,
 		r.upperSideHingeR.Child.At,
 		r.lowerSideArmR,
-		hingePose(armTipTopJoint, pitchX(-math.Pi), armBaseTopPivot), // [0] Vlak teruggevouwen in bakje
+		hingePose(armTipTopJoint, elbowBase, armBaseTopPivot),
 	)
-	r.lowerSideHingeR.AddDOF(0, hingePose(armTipTopJoint, pitchX(-0.95), armBaseTopPivot))                  // [1] Werkhouding
-	r.lowerSideHingeR.AddDOF(0, hingePose(armTipTopJoint, pitchX(-0.10).Mul(rollZ(0.06)), armBaseTopPivot)) // [2] Zeer hoog gestrekt
-	r.lowerSideHingeR.AddDOF(0, hingePose(armTipTopJoint, rollZ(-0.04), armBaseTopPivot))                   // [3] Zeer breed gestrekt
-	r.lowerSideHingeR.AddDOF(0, hingePose(armTipTopJoint, pitchX(0.75).Mul(rollZ(0.12)), armBaseTopPivot))  // [4] Zeer laag naar vloer voor
-	r.lowerSideHingeR.AddDOF(0, hingePose(armTipTopJoint, pitchX(0.55).Mul(rollZ(-0.18)), armBaseTopPivot)) // [5] Laag & breed naar vloer zij
-	r.lowerSideHingeR.AddDOF(0, hingePose(armTipTopJoint, rollZ(0.10), armBaseTopPivot))                    // [6] Ver vooruit gestrekt
-	r.lowerSideHingeR.AddDOF(0, hingePose(armTipTopJoint, pitchX(-0.82).Mul(rollZ(0.20)), armBaseTopPivot)) // [7] Achterwaarts kraan
-	r.lowerSideHingeR.AddDOF(0, hingePose(armTipTopJoint, rollZ(0.62).Mul(pitchX(1.07)), armBaseTopPivot))  // [8] Hand-lopen basis (verticaal naar grond)
-	r.lowerSideHingeR.AddDOF(0, hingePose(armTipTopJoint, rollZ(0.65).Mul(pitchX(0.75)), armBaseTopPivot))  // [9] Hand-lopen stap (rechts aan grond)
+	r.lowerSideHingeR.AddDOF(0, hingePose(armTipTopJoint, rotX(elbowPitchMax).Mul(rotZ(elbowRollMin)), armBaseTopPivot))
+	r.lowerSideHingeR.AddDOF(0, hingePose(armTipTopJoint, rotX(elbowPitchMin).Mul(rotZ(elbowRollMax)), armBaseTopPivot))
 
 	// =========================================================================
-	// 5L. Linker pols hinge (klapt in modus 0 naar voren in het bakje)
+	// 6L. Linker pols scharnier: 2 DOFs ([0]=rotX op/neer, [1]=rotY draaien)
 	// =========================================================================
+	wristLBase := rotX(wristPitchMin).Mul(rotY(wristYawLMin))
 	r.wristHingeL = NewHinge(
 		r.lowerSideArmL,
 		r.lowerSideHingeL.Child.At,
 		r.wristL,
-		hingePose(armTipJoint, pitchX(math.Pi), wristPivot), // [0] Vooruit gevouwen in het bakje
+		hingePose(armTipTopJoint, wristLBase, wristPivot),
 	)
-	r.wristHingeL.AddDOF(0, hingePose(armTipJoint, pitchX(0.55), wristPivot))      // [1] Werkhouding
-	r.wristHingeL.AddDOF(0, hingePose(armTipJoint, IdentityQuat(), wristPivot))    // [2] Hoog reikend
-	r.wristHingeL.AddDOF(0, hingePose(armTipJoint, yawY(0.40), wristPivot))        // [3] Breed uitgespreid
-	r.wristHingeL.AddDOF(0, hingePose(armTipJoint, pitchX(-0.85), wristPivot))     // [4] Laag horizontaal vooruit
-	r.wristHingeL.AddDOF(0, hingePose(armTipJoint, rollZ(-0.35), wristPivot))      // [5] Laag & breed zijwaarts
-	r.wristHingeL.AddDOF(0, hingePose(armTipJoint, yawY(0.20), wristPivot))        // [6] Ver vooruit reikend
-	r.wristHingeL.AddDOF(0, hingePose(armTipJoint, pitchX(-0.35), wristPivot))     // [7] Achterwaarts kraan
-	r.wristHingeL.AddDOF(0, hingePose(armTipJoint, yawY(math.Pi*0.5), wristPivot)) // [8] Hand-lopen steunvoet op grond
-	r.wristHingeL.AddDOF(0, hingePose(armTipJoint, yawY(math.Pi*0.5), wristPivot)) // [9] Hand-lopen stap op grond
+	r.wristHingeL.AddDOF(0, hingePose(armTipTopJoint, rotX(wristPitchMax).Mul(rotY(wristYawLMin)), wristPivot))
+	r.wristHingeL.AddDOF(0, hingePose(armTipTopJoint, rotX(wristPitchMin).Mul(rotY(wristYawLMax)), wristPivot))
 
 	// =========================================================================
-	// 5R. Rechter pols hinge (klapt in modus 0 naar voren in het bakje)
+	// 6R. Rechter pols scharnier: 2 DOFs ([0]=rotX op/neer, [1]=rotY draaien)
 	// =========================================================================
+	wristRBase := rotX(wristPitchMin).Mul(rotY(wristYawRMin))
 	r.wristHingeR = NewHinge(
 		r.lowerSideArmR,
 		r.lowerSideHingeR.Child.At,
 		r.wristR,
-		hingePose(armTipJoint, pitchX(math.Pi), wristPivot), // [0] Vooruit gevouwen in het bakje
+		hingePose(armTipTopJoint, wristRBase, wristPivot),
 	)
-	r.wristHingeR.AddDOF(0, hingePose(armTipJoint, pitchX(0.55), wristPivot))       // [1] Werkhouding
-	r.wristHingeR.AddDOF(0, hingePose(armTipJoint, IdentityQuat(), wristPivot))     // [2] Hoog reikend
-	r.wristHingeR.AddDOF(0, hingePose(armTipJoint, yawY(-0.40), wristPivot))        // [3] Breed uitgespreid
-	r.wristHingeR.AddDOF(0, hingePose(armTipJoint, pitchX(-0.85), wristPivot))      // [4] Laag horizontaal vooruit
-	r.wristHingeR.AddDOF(0, hingePose(armTipJoint, rollZ(0.35), wristPivot))        // [5] Laag & breed zijwaarts
-	r.wristHingeR.AddDOF(0, hingePose(armTipJoint, yawY(-0.20), wristPivot))        // [6] Ver vooruit reikend
-	r.wristHingeR.AddDOF(0, hingePose(armTipJoint, pitchX(-0.35), wristPivot))      // [7] Achterwaarts kraan
-	r.wristHingeR.AddDOF(0, hingePose(armTipJoint, yawY(-math.Pi*0.5), wristPivot)) // [8] Hand-lopen steunvoet op grond
-	r.wristHingeR.AddDOF(0, hingePose(armTipJoint, yawY(-math.Pi*0.5), wristPivot)) // [9] Hand-lopen stap op grond
+	r.wristHingeR.AddDOF(0, hingePose(armTipTopJoint, rotX(wristPitchMax).Mul(rotY(wristYawRMin)), wristPivot))
+	r.wristHingeR.AddDOF(0, hingePose(armTipTopJoint, rotX(wristPitchMin).Mul(rotY(wristYawRMax)), wristPivot))
 
 	// =========================================================================
-	// 6. Grijper-vinger hinges met eigen open/sluit DOF (0.0 = dicht, 1.0 = open)
+	// 7. Grijper-vinger scharnieren: 1 DOF per vinger (open/sluit)
 	// =========================================================================
-	const jawOpenAngle float32 = 0.52
-
 	r.gripHingeL1 = NewHinge(r.wristL, r.wristHingeL.Child.At, r.gripFingerL1, hingePose(wristJawInnerJoint, IdentityQuat(), fingerPivot))
-	r.gripHingeL1.AddDOF(0, hingePose(wristJawInnerJoint, rollZ(jawOpenAngle), fingerPivot))
+	r.gripHingeL1.AddDOF(0, hingePose(wristJawInnerJoint, rotZ(jawOpenTurns), fingerPivot))
 
 	r.gripHingeL2 = NewHinge(r.wristL, r.wristHingeL.Child.At, r.gripFingerL2, hingePose(wristJawOuterJoint, IdentityQuat(), fingerPivot))
-	r.gripHingeL2.AddDOF(0, hingePose(wristJawOuterJoint, rollZ(-jawOpenAngle), fingerPivot))
+	r.gripHingeL2.AddDOF(0, hingePose(wristJawOuterJoint, rotZ(-jawOpenTurns), fingerPivot))
 
 	r.gripHingeR1 = NewHinge(r.wristR, r.wristHingeR.Child.At, r.gripFingerR1, hingePose(wristJawInnerJoint, IdentityQuat(), fingerPivot))
-	r.gripHingeR1.AddDOF(0, hingePose(wristJawInnerJoint, rollZ(jawOpenAngle), fingerPivot))
+	r.gripHingeR1.AddDOF(0, hingePose(wristJawInnerJoint, rotZ(jawOpenTurns), fingerPivot))
 
 	r.gripHingeR2 = NewHinge(r.wristR, r.wristHingeR.Child.At, r.gripFingerR2, hingePose(wristJawOuterJoint, IdentityQuat(), fingerPivot))
-	r.gripHingeR2.AddDOF(0, hingePose(wristJawOuterJoint, rollZ(-jawOpenAngle), fingerPivot))
+	r.gripHingeR2.AddDOF(0, hingePose(wristJawOuterJoint, rotZ(-jawOpenTurns), fingerPivot))
 
-	// Start in modus 0 (Ingeklapt in bakje)
+	// Initialiseer direct op houding 0 (Ingeklapt in het bakje)
 	r.mode = 0
 	r.targetMode = 0
 	r.postureStep = postureTransitionFrames
-	r.updateUpperBodyHinges()
+	r.applyPostureImmediate(0)
 }
 
 // SetWireframe switches all robot Shape parts between solid and wireframe rendering.
@@ -602,64 +745,72 @@ func (r *Robot) UpdateWheels(velForward, velStrafe, angularVel, dt float32) {
 	}
 }
 
-func modeRatios(mode int) [postureDOFCount]float32 {
-	var ratios [postureDOFCount]float32
-	if mode >= 1 && mode <= postureDOFCount {
-		ratios[mode-1] = 1.0
-	}
-	return ratios
-}
-
-func modeGripperOpen(mode int) float32 {
-	switch mode {
-	case 1: // Z-Werkhouding
-		return 0.45
-	case 2: // Zeer hoog reikend
-		return 1.0
-	case 3: // Zeer breed uitgespreid
-		return 0.85
-	case 4: // Zeer laag vooruit
-		return 0.90
-	case 5: // Laag & breed zijwaarts
-		return 0.75
-	case 6: // Ver vooruit reikend
-		return 0.80
-	case 7: // Achterwaarts kraan
-		return 0.50
-	case 8, 9: // Hand-locomotie (wijde steunvoeten op de grond)
-		return 1.0
-	default: // 0: Ingeklapt in bakje
-		return 0.0
+func setHingeDOF1(h *Hinge, r0 float32) {
+	if h != nil && len(h.DOF) >= 1 {
+		h.DOF[0].Ratio = r0
 	}
 }
 
-func captureDOFRatios(h *Hinge) [postureDOFCount]float32 {
-	var ratios [postureDOFCount]float32
-	if h == nil {
-		return ratios
-	}
-	for i := 0; i < postureDOFCount && i < len(h.DOF); i++ {
-		ratios[i] = h.DOF[i].Ratio
-	}
-	return ratios
-}
-
-func applyLerpedDOFRatios(h *Hinge, start, target [postureDOFCount]float32, t float32) {
-	if h == nil {
-		return
-	}
-	for i := 0; i < postureDOFCount && i < len(h.DOF); i++ {
-		h.DOF[i].Ratio = start[i] + (target[i]-start[i])*t
+func setHingeDOF2(h *Hinge, r0, r1 float32) {
+	if h != nil && len(h.DOF) >= 2 {
+		h.DOF[0].Ratio = r0
+		h.DOF[1].Ratio = r1
 	}
 }
 
 func setGripperJawRatio(h1, h2 *Hinge, ratio float32) {
-	if h1 != nil && len(h1.DOF) > 0 {
-		h1.DOF[0].Ratio = ratio
-	}
-	if h2 != nil && len(h2.DOF) > 0 {
-		h2.DOF[0].Ratio = ratio
-	}
+	setHingeDOF1(h1, ratio)
+	setHingeDOF1(h2, ratio)
+}
+
+func lerp1(a, b [1]float32, t float32) float32 {
+	return a[0] + (b[0]-a[0])*t
+}
+
+func lerp2(a, b [2]float32, t float32) (float32, float32) {
+	return a[0] + (b[0]-a[0])*t, a[1] + (b[1]-a[1])*t
+}
+
+func (r *Robot) applyPostureImmediate(mode int) {
+	p := robotPostures[mode]
+
+	setHingeDOF1(r.lowerCenterHinge, turnsToRatio(p.LowerCenterPitch, lowerCenterPitchMin, lowerCenterPitchMax))
+	setHingeDOF1(r.upperCenterHinge, turnsToRatio(p.UpperCenterPitch, upperCenterPitchMin, upperCenterPitchMax))
+	setHingeDOF1(r.cameraHinge, turnsToRatio(p.CameraPitch, cameraPitchMin, cameraPitchMax))
+
+	setHingeDOF2(r.upperSideHingeL,
+		turnsToRatio(p.UpperSideL[0], shoulderPitchMin, shoulderPitchMax),
+		turnsToRatio(p.UpperSideL[1], shoulderRollLMin, shoulderRollLMax),
+	)
+	setHingeDOF2(r.lowerSideHingeL,
+		turnsToRatio(p.LowerSideL[0], elbowPitchMin, elbowPitchMax),
+		turnsToRatio(p.LowerSideL[1], elbowRollMin, elbowRollMax),
+	)
+	setHingeDOF2(r.upperSideHingeR,
+		turnsToRatio(p.UpperSideR[0], shoulderPitchMin, shoulderPitchMax),
+		turnsToRatio(p.UpperSideR[1], shoulderRollRMin, shoulderRollRMax),
+	)
+	setHingeDOF2(r.lowerSideHingeR,
+		turnsToRatio(p.LowerSideR[0], elbowPitchMin, elbowPitchMax),
+		turnsToRatio(p.LowerSideR[1], elbowRollMin, elbowRollMax),
+	)
+	setHingeDOF2(r.wristHingeL,
+		turnsToRatio(p.WristL[0], wristPitchMin, wristPitchMax),
+		turnsToRatio(p.WristL[1], wristYawLMin, wristYawLMax),
+	)
+	setHingeDOF2(r.wristHingeR,
+		turnsToRatio(p.WristR[0], wristPitchMin, wristPitchMax),
+		turnsToRatio(p.WristR[1], wristYawRMin, wristYawRMax),
+	)
+
+	r.startGripL = p.GripperOpen
+	r.targetGripL = p.GripperOpen
+	r.startGripR = p.GripperOpen
+	r.targetGripR = p.GripperOpen
+	setGripperJawRatio(r.gripHingeL1, r.gripHingeL2, p.GripperOpen)
+	setGripperJawRatio(r.gripHingeR1, r.gripHingeR2, p.GripperOpen)
+
+	r.updateUpperBodyHinges()
 }
 
 func (r *Robot) updateUpperBodyHinges() {
@@ -728,15 +879,27 @@ func (r *Robot) UpdatePosture() {
 	r.postureStep++
 	t := float32(r.postureStep) / float32(postureTransitionFrames)
 
-	applyLerpedDOFRatios(r.lowerCenterHinge, r.startLowerRatios, r.targetRatios, t)
-	applyLerpedDOFRatios(r.upperCenterHinge, r.startUpperRatios, r.targetRatios, t)
-	applyLerpedDOFRatios(r.cameraHinge, r.startCameraRatios, r.targetRatios, t)
-	applyLerpedDOFRatios(r.upperSideHingeL, r.startUpperSideLRatios, r.targetRatios, t)
-	applyLerpedDOFRatios(r.lowerSideHingeL, r.startLowerSideLRatios, r.targetRatios, t)
-	applyLerpedDOFRatios(r.upperSideHingeR, r.startUpperSideRRatios, r.targetRatios, t)
-	applyLerpedDOFRatios(r.lowerSideHingeR, r.startLowerSideRRatios, r.targetRatios, t)
-	applyLerpedDOFRatios(r.wristHingeL, r.startWristLRatios, r.targetRatios, t)
-	applyLerpedDOFRatios(r.wristHingeR, r.startWristRRatios, r.targetRatios, t)
+	setHingeDOF1(r.lowerCenterHinge, lerp1(r.startLowerDOF, r.targetLowerDOF, t))
+	setHingeDOF1(r.upperCenterHinge, lerp1(r.startUpperDOF, r.targetUpperDOF, t))
+	setHingeDOF1(r.cameraHinge, lerp1(r.startCameraDOF, r.targetCameraDOF, t))
+
+	uL0, uL1 := lerp2(r.startUpperSideLDOF, r.targetUpperSideLDOF, t)
+	setHingeDOF2(r.upperSideHingeL, uL0, uL1)
+
+	lL0, lL1 := lerp2(r.startLowerSideLDOF, r.targetLowerSideLDOF, t)
+	setHingeDOF2(r.lowerSideHingeL, lL0, lL1)
+
+	uR0, uR1 := lerp2(r.startUpperSideRDOF, r.targetUpperSideRDOF, t)
+	setHingeDOF2(r.upperSideHingeR, uR0, uR1)
+
+	lR0, lR1 := lerp2(r.startLowerSideRDOF, r.targetLowerSideRDOF, t)
+	setHingeDOF2(r.lowerSideHingeR, lR0, lR1)
+
+	wL0, wL1 := lerp2(r.startWristLDOF, r.targetWristLDOF, t)
+	setHingeDOF2(r.wristHingeL, wL0, wL1)
+
+	wR0, wR1 := lerp2(r.startWristRDOF, r.targetWristRDOF, t)
+	setHingeDOF2(r.wristHingeR, wR0, wR1)
 
 	gripL := r.startGripL + (r.targetGripL-r.startGripL)*t
 	gripR := r.startGripR + (r.targetGripR-r.startGripR)*t
@@ -752,33 +915,59 @@ func (r *Robot) UpdatePosture() {
 
 // SetMode starts a 100-frame hinge transition of the Z-Bot upper body to `newMode` (0..9).
 func (r *Robot) SetMode(newMode int) {
-	if newMode < 0 || newMode > postureDOFCount {
+	if newMode < 0 || newMode >= postureCount {
 		return
 	}
 	if newMode == r.targetMode && r.postureStep >= postureTransitionFrames {
 		return
 	}
 
-	r.startLowerRatios = captureDOFRatios(r.lowerCenterHinge)
-	r.startUpperRatios = captureDOFRatios(r.upperCenterHinge)
-	r.startCameraRatios = captureDOFRatios(r.cameraHinge)
-	r.startUpperSideLRatios = captureDOFRatios(r.upperSideHingeL)
-	r.startLowerSideLRatios = captureDOFRatios(r.lowerSideHingeL)
-	r.startUpperSideRRatios = captureDOFRatios(r.upperSideHingeR)
-	r.startLowerSideRRatios = captureDOFRatios(r.lowerSideHingeR)
-	r.startWristLRatios = captureDOFRatios(r.wristHingeL)
-	r.startWristRRatios = captureDOFRatios(r.wristHingeR)
-	if r.gripHingeL1 != nil && len(r.gripHingeL1.DOF) > 0 {
-		r.startGripL = r.gripHingeL1.DOF[0].Ratio
+	r.startLowerDOF[0] = r.lowerCenterHinge.DOF[0].Ratio
+	r.startUpperDOF[0] = r.upperCenterHinge.DOF[0].Ratio
+	r.startCameraDOF[0] = r.cameraHinge.DOF[0].Ratio
+
+	r.startUpperSideLDOF = [2]float32{r.upperSideHingeL.DOF[0].Ratio, r.upperSideHingeL.DOF[1].Ratio}
+	r.startLowerSideLDOF = [2]float32{r.lowerSideHingeL.DOF[0].Ratio, r.lowerSideHingeL.DOF[1].Ratio}
+	r.startUpperSideRDOF = [2]float32{r.upperSideHingeR.DOF[0].Ratio, r.upperSideHingeR.DOF[1].Ratio}
+	r.startLowerSideRDOF = [2]float32{r.lowerSideHingeR.DOF[0].Ratio, r.lowerSideHingeR.DOF[1].Ratio}
+	r.startWristLDOF = [2]float32{r.wristHingeL.DOF[0].Ratio, r.wristHingeL.DOF[1].Ratio}
+	r.startWristRDOF = [2]float32{r.wristHingeR.DOF[0].Ratio, r.wristHingeR.DOF[1].Ratio}
+
+	r.startGripL = r.gripHingeL1.DOF[0].Ratio
+	r.startGripR = r.gripHingeR1.DOF[0].Ratio
+
+	p := robotPostures[newMode]
+	r.targetLowerDOF = [1]float32{turnsToRatio(p.LowerCenterPitch, lowerCenterPitchMin, lowerCenterPitchMax)}
+	r.targetUpperDOF = [1]float32{turnsToRatio(p.UpperCenterPitch, upperCenterPitchMin, upperCenterPitchMax)}
+	r.targetCameraDOF = [1]float32{turnsToRatio(p.CameraPitch, cameraPitchMin, cameraPitchMax)}
+
+	r.targetUpperSideLDOF = [2]float32{
+		turnsToRatio(p.UpperSideL[0], shoulderPitchMin, shoulderPitchMax),
+		turnsToRatio(p.UpperSideL[1], shoulderRollLMin, shoulderRollLMax),
 	}
-	if r.gripHingeR1 != nil && len(r.gripHingeR1.DOF) > 0 {
-		r.startGripR = r.gripHingeR1.DOF[0].Ratio
+	r.targetLowerSideLDOF = [2]float32{
+		turnsToRatio(p.LowerSideL[0], elbowPitchMin, elbowPitchMax),
+		turnsToRatio(p.LowerSideL[1], elbowRollMin, elbowRollMax),
+	}
+	r.targetUpperSideRDOF = [2]float32{
+		turnsToRatio(p.UpperSideR[0], shoulderPitchMin, shoulderPitchMax),
+		turnsToRatio(p.UpperSideR[1], shoulderRollRMin, shoulderRollRMax),
+	}
+	r.targetLowerSideRDOF = [2]float32{
+		turnsToRatio(p.LowerSideR[0], elbowPitchMin, elbowPitchMax),
+		turnsToRatio(p.LowerSideR[1], elbowRollMin, elbowRollMax),
+	}
+	r.targetWristLDOF = [2]float32{
+		turnsToRatio(p.WristL[0], wristPitchMin, wristPitchMax),
+		turnsToRatio(p.WristL[1], wristYawLMin, wristYawLMax),
+	}
+	r.targetWristRDOF = [2]float32{
+		turnsToRatio(p.WristR[0], wristPitchMin, wristPitchMax),
+		turnsToRatio(p.WristR[1], wristYawRMin, wristYawRMax),
 	}
 
-	r.targetRatios = modeRatios(newMode)
-	gripTarget := modeGripperOpen(newMode)
-	r.targetGripL = gripTarget
-	r.targetGripR = gripTarget
+	r.targetGripL = p.GripperOpen
+	r.targetGripR = p.GripperOpen
 	r.targetMode = newMode
 	r.postureStep = 0
 }
